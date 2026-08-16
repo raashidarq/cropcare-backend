@@ -5,3 +5,4 @@ slowapi
 google-generativeai
 pytest
 ruff
+httpx2
