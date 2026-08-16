@@ -3,3 +3,5 @@ uvicorn
 pydantic
 slowapi
 google-generativeai
+pytest
+ruff
