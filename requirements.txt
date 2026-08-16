@@ -1,0 +1,5 @@
+fastapi
+uvicorn
+pydantic
+slowapi
+google-generativeai
