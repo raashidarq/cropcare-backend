@@ -6,3 +6,4 @@ google-generativeai
 pytest
 ruff
 httpx2
+email-validator
