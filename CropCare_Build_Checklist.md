@@ -106,14 +106,14 @@ I've run a python script to get me to the stage of ONNX file and data. The plan 
 
 **Updated goal**: Implementing OTP is costly due to the needing a SMS provider in Twilio. Such functionality has been reserved for MVP demonstrations only and general usecase is to use email implementation via Supabase.
 
-**Tasks — Backend** (PARTIALLY IMPLEMENTED)
+**Tasks — Backend** (DONE)
 
-- [ ] Enable phone auth provider in Supabase dashboard
-- [ ] Build `POST /auth/request-otp`: accepts a phone number, rate-limits per phone (e.g. 3 requests / 10 min via `slowapi`), calls Supabase Auth Admin API to send the OTP
-- [ ] Build `POST /auth/verify-otp`: accepts phone + code, calls Supabase Auth to verify, on success relays back `access_token` + `refresh_token`
-- [ ] Build JWT-verification middleware/dependency: reads the `Authorization: Bearer` header, verifies the signature against `SUPABASE_JWT_SECRET`, extracts `user_id`, rejects invalid/expired tokens with 401 — apply it to every route except the two `/auth/*` ones
-- [ ] Write the actual RLS policies now that `auth.uid()` is meaningful (kept as defense-in-depth per the architecture doc)
-- [ ] Write a couple of `pytest` tests: request-otp respects the rate limit, verify-otp rejects a bad code, a protected route rejects a missing/invalid JWT
+- [x] Enable phone auth provider in Supabase dashboard (gated by PHONE_AUTH_ENABLED)
+- [x] Build `POST /auth/request-otp`: accepts email or phone, rate-limits per identifier (3 requests / 10 min via `slowapi`), calls Supabase Auth Admin API
+- [x] Build `POST /auth/verify-otp`: accepts identifier + code, calls Supabase Auth to verify, relays back `access_token` + `refresh_token`
+- [x] Build JWT-verification dependency: `dependencies/jwt_auth.py` (`get_current_user_id` pinned to HS256, `get_optional_user_id`), applied to all sync & diagnosis routes
+- [x] Write the actual RLS policies for Supabase tables and storage (applied via SQL Editor)
+- [x] Write `pytest` tests: rate limiting, OTP verification, JWT attacks, and scoping (13 tests in `tests/test_auth.py`)
 
 **Tasks — App** (NOT IMPLEMENTED YET)
 
@@ -154,20 +154,19 @@ I've run a python script to get me to the stage of ONNX file and data. The plan 
 
 ---
 
-## Treatment guidance: FastAPI → Gemini, with local fallback, plus TTS (IN_PROGRESS)
+## Treatment guidance: FastAPI → Gemini, with local fallback, plus TTS (DONE ON BACKEND)
 
 **Goal:** The diagnosis screen shows real, localized treatment guidance — Gemini via FastAPI when online, local fallback offline — and both branches are tested.
 
 **UPDATED GOAL**: Local feedback and TTS is postponed till after core functionality is implemented.
 
-**Tasks — Backend** (NOT IMPLEMENTED YET)
+**Tasks — Backend** (DONE)
 
-- [ ] Build `POST /interpret-diagnosis`: accepts `{crop, disease_id, confidence, severity, language_code}`, rate-limited per user
-- [ ] Call Gemini with a prompt asking explicitly for the four fields (summary, what to do, what to avoid, recheck days) in the target language
-- [ ] Parse the response into those fields; on any failure/timeout, return a clear error status rather than a partial/malformed body
-- [ ] Write to `public.llm_interpretation` (success or failure) for audit
-- [ ] Write a `pytest` test mocking the Gemini call to fail, confirming the endpoint returns a clean error (not a 500 crash) — this is what lets the app's fallback logic trust the response shape (postponed till after core functionality is implemented)
-- [ ] Write a `pytest` test mocking Gemini to succeed, confirming the response is parsed and logged correctly (postponed till after core functionality is implemented)
+- [x] Build `POST /interpret-diagnosis`: accepts `{crop_id, disease_id, confidence, severity, language_code, user_observations}`, rate-limited 20/min per user/IP
+- [x] Call Gemini 1.5 Flash with structured JSON schema for the four fields (summary, what to do, what to avoid, recheck days) in the target language (`en`, `si`, `ta`)
+- [x] Parse the response into structured fields; return standard `{ "detail": "..." }` on error
+- [x] Write to `public.llm_interpretation` for audit
+- [x] Write `pytest` test suite: test failure handling, missing keys, malformed JSON, and success parsing (`tests/test_diagnosis.py`, 8 tests)
 
 **Tasks — App** (NOT IMPLEMENTED YET. Seeding the treatment_guideline local is postponed till after main features are implemented. Right now, the LLM is the only source of treatment guidance. Fallback should be prepared but left unused till after main feature flow is done. i.e. treatment guidance is done and escalation and scan history list is also done. Also, TTS is also done.)
 
@@ -217,13 +216,13 @@ END OF MAIN WORKFLOW
 
 **Learn today:** Generating a Supabase signed upload URL server-side, idempotent upserts (`ON CONFLICT DO UPDATE`), background task basics (or a simpler sync-on-resume + manual button if time is tight), testing against a fake instead of a live network call.
 
-**Tasks — Backend**
+**Tasks — Backend** (DONE)
 
-- [ ] Build `POST /scans/{id}/upload-url`: authenticated, generates and returns a short-lived Supabase Storage signed URL scoped to that user's path
-- [ ] Build `POST /scans`, `POST /diagnoses`, `POST /escalations`: authenticated, each upserts using `(user_id, local_entity_id)` as the idempotency key, scoped to the JWT's `user_id`
-- [ ] Build `GET /reference-data?since=`: authenticated, returns changed reference rows
-- [ ] Write a `pytest` test: calling `POST /scans` twice with the same `local_scan_id` results in one row, not two (the idempotency behavior itself, not just trusting Postgres)
-- [ ] Write a `pytest` test: a request with someone else's `user_id` in the payload still gets scoped to the JWT's actual `user_id`, not the payload's
+- [x] Build `POST /scans/{id}/upload-url`: authenticated, generates and returns a short-lived Supabase Storage signed URL scoped to that user's path
+- [x] Build `POST /scans`, `POST /diagnoses`, `POST /escalations`: authenticated, each upserts using `(user_id, local_entity_id)` as the idempotency key, scoped to the JWT's `user_id`
+- [x] Build `GET /reference-data?since=`: authenticated, returns changed reference rows
+- [x] Write a `pytest` test: calling `POST /scans` twice with the same `local_scan_id` results in one row, not two (the idempotency behavior itself, not just trusting Postgres)
+- [x] Write a `pytest` test: a request with someone else's `user_id` in the payload still gets scoped to the JWT's actual `user_id`, not the payload's
 
 **Tasks — App**
 

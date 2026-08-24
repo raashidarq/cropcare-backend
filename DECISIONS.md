@@ -100,3 +100,36 @@ This log records major architectural and technical decisions made in the CropCar
 **Date:** 2026-08-24  
 **Decision:**
 - Kept the backend structure clean and flat (`routers/`, `dependencies/`, `config.py`, `tests/`) rather than introducing prematurely complex multi-layer abstractions (e.g. redundant service or repository interfaces) before database sync models are implemented.
+
+---
+
+### TD-010 · Idempotent Sync Architecture & User-Scoped Upsert Enforcement
+
+**Date:** 2026-08-24  
+**Decision:**
+- Sync endpoints (`POST /scans`, `POST /diagnoses`, `POST /escalations`) are protected with `get_current_user_id`.
+- The server forcibly injects `user_id = jwt_user_id` into every row payload, ignoring any client-provided or spoofed `user_id`.
+- Idempotency is enforced using `on_conflict="user_id,local_scan_id"`, `on_conflict="user_id,local_diagnosis_id"`, and `on_conflict="user_id,local_escalation_id"`.
+- Network retries from client background sync workers will safely update existing records without creating duplicates.
+
+---
+
+### TD-011 · Supabase Signed Upload URLs for Direct Storage Ingestion
+
+**Date:** 2026-08-24  
+**Decision:**
+- Binary image payloads are never proxied through the Render FastAPI instance, preserving bandwidth and preventing timeouts.
+- `POST /scans/{id}/upload-url` generates a short-lived signed upload URL via Supabase Storage for bucket `scan-images`, strictly scoped to `{user_id}/{scan_id}.jpg`.
+- The Flutter client uploads JPEG bytes directly to Supabase Storage using the signed URL.
+
+---
+
+### TD-012 · Defense-in-Depth Row-Level Security (RLS) Policy Matrix
+
+**Date:** 2026-08-24  
+**Decision:**
+- While FastAPI acts as the primary query-scoping boundary via the service-role key, RLS is enabled on all tables in Supabase Postgres.
+- User-scoped tables (`profile`, `scan`, `diagnosis`, `escalation`, `sync_log`, `llm_interpretation`) enforce `auth.uid() = user_id`.
+- Reference tables (`crop`, `disease`, `treatment_guideline`, `model_version`) allow public read (`USING (true)`) and restrict writes to service role / admin.
+- DDL and RLS definitions are applied directly to Supabase Cloud via SQL Editor.
+
