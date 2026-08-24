@@ -60,3 +60,19 @@ def get_current_user_id(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=_GENERIC_401)
 
     return user_id
+
+
+def get_optional_user_id(
+    credentials: HTTPAuthorizationCredentials | None = Depends(_bearer_scheme),  # noqa: B008
+) -> str | None:
+    """
+    FastAPI dependency that validates the Bearer JWT if present and returns the user ID (sub).
+    Returns None if no Authorization header was provided.
+
+    Raises:
+        HTTPException(401): if a token was provided but is invalid or expired.
+    """
+    if credentials is None:
+        return None
+    return get_current_user_id(credentials)
+

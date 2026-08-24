@@ -5,5 +5,7 @@ slowapi
 google-generativeai
 pytest
 ruff
-httpx2
+httpx
 email-validator
+supabase
+pyjwt

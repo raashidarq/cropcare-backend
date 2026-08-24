@@ -21,6 +21,7 @@ class _Settings:
             "SUPABASE_SERVICE_ROLE_KEY", ""
         )
         self.supabase_jwt_secret: str = os.environ.get("SUPABASE_JWT_SECRET", "")
+        self.gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
         # Phone auth is DISABLED by default — deliberate cost-control gate.
         # Costs real money per SMS; enable only when explicitly configured.
         self.phone_auth_enabled: bool = (
