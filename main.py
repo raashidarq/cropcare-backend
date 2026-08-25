@@ -6,6 +6,7 @@ from slowapi.middleware import SlowAPIMiddleware
 from routers.auth import limiter
 from routers.auth import router as auth_router
 from routers.diagnosis import router as diagnosis_router
+from routers.feedback import router as feedback_router
 from routers.sync import router as sync_router
 
 app = FastAPI(title="CropCare API")
@@ -22,6 +23,7 @@ app.add_middleware(SlowAPIMiddleware)
 app.include_router(auth_router)
 app.include_router(diagnosis_router)
 app.include_router(sync_router)
+app.include_router(feedback_router)
 
 
 @app.get("/health")

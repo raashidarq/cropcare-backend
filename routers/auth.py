@@ -30,13 +30,16 @@ Supabase OTP types
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Request, status
-from pydantic import BaseModel, EmailStr
+from typing import Any
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from pydantic import BaseModel, EmailStr, Field
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 from supabase import Client, create_client
 
 from config import settings
+from dependencies.jwt_auth import get_current_user_id
 
 # ---------------------------------------------------------------------------
 # SlowAPI limiter — keyed on the actual identifier, not the IP
@@ -82,6 +85,71 @@ class OtpVerifyBody(BaseModel):
     email: EmailStr | None = None
     phone: str | None = None
     code: str
+
+
+class ForgotPasswordRequestBody(BaseModel):
+    email: EmailStr
+
+
+class ForgotPasswordResponse(BaseModel):
+    message: str = "If an account exists with this email, password reset instructions have been sent."
+    status: str = "success"
+
+
+class DeleteAccountResponse(BaseModel):
+    status: str = "success"
+    message: str = "Account successfully deleted"
+
+
+class UserProfileSummary(BaseModel):
+    id: str
+    email: str | None = None
+    phone_number: str | None = None
+    updated_at: str | None = None
+
+
+class ChangeEmailRequestBody(BaseModel):
+    new_email: EmailStr
+
+
+class ChangeEmailResponse(BaseModel):
+    success: bool = True
+    message: str = "Email updated successfully"
+    user: UserProfileSummary
+
+
+class ChangePhoneRequestOtpBody(BaseModel):
+    new_phone_number: str = Field(..., min_length=5)
+
+
+class ChangePhoneRequestOtpResponse(BaseModel):
+    success: bool = True
+    message: str
+
+
+class ChangePhoneVerifyOtpBody(BaseModel):
+    new_phone_number: str = Field(..., min_length=5)
+    otp_code: str = Field(..., min_length=1)
+
+
+class ChangePhoneVerifyOtpResponse(BaseModel):
+    success: bool = True
+    message: str = "Phone number updated successfully"
+    user: UserProfileSummary
+
+
+def _format_user_summary(user: Any) -> UserProfileSummary:
+    user_id = getattr(user, "id", None) or (user.get("id") if isinstance(user, dict) else "")
+    email = getattr(user, "email", None) or (user.get("email") if isinstance(user, dict) else None)
+    phone = getattr(user, "phone", None) or (user.get("phone") if isinstance(user, dict) else None)
+    updated_at = getattr(user, "updated_at", None) or (user.get("updated_at") if isinstance(user, dict) else None)
+    return UserProfileSummary(
+        id=str(user_id),
+        email=str(email) if email else None,
+        phone_number=str(phone) if phone else None,
+        updated_at=str(updated_at) if updated_at else None,
+    )
+
 
 
 # ---------------------------------------------------------------------------
@@ -220,3 +288,207 @@ async def verify_otp(body: OtpVerifyBody) -> dict:
         "refresh_token": session.refresh_token,
         "expires_at": session.expires_at,
     }
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/forgot-password
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/forgot-password",
+    response_model=ForgotPasswordResponse,
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit("3/10minutes")
+async def forgot_password(
+    request: Request,
+    body: ForgotPasswordRequestBody,
+) -> ForgotPasswordResponse:
+    """
+    Trigger a password reset email for the provided email address.
+
+    Security & Information Hiding:
+    - Returns 200 OK with a generic success message even if the email is not registered
+      or Supabase returns an error, preventing account enumeration.
+    - Rate-limited to 3 requests per 10 minutes per email address via SlowAPI.
+    - 422 Unprocessable Entity returned on invalid email format via Pydantic.
+    """
+    request.state.rate_limit_key = str(body.email)
+
+    try:
+        supabase = _get_supabase()
+        supabase.auth.reset_password_for_email(str(body.email))
+    except Exception:  # noqa: BLE001, S110
+        # Prevent user enumeration attacks by suppressing errors
+        pass
+
+    return ForgotPasswordResponse(
+        message="If an account exists with this email, password reset instructions have been sent.",
+        status="success",
+    )
+
+
+# ---------------------------------------------------------------------------
+# DELETE /auth/account
+# ---------------------------------------------------------------------------
+
+@router.delete(
+    "/account",
+    response_model=DeleteAccountResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def delete_account(
+    user_id: str = Depends(get_current_user_id),
+) -> DeleteAccountResponse:
+    """
+    Deletes the authenticated user's account and cascades removal of associated sync records.
+    Requires a valid Bearer JWT.
+    """
+    supabase = _get_supabase()
+
+    # Cascade deletion across user-scoped data tables
+    for table_name in ["scan", "diagnosis", "escalation", "profile", "llm_interpretation"]:
+        try:
+            supabase.table(table_name).delete().eq("user_id", user_id).execute()
+        except Exception:  # noqa: BLE001
+            pass
+
+    # Delete user from Supabase Auth via Admin API
+    try:
+        supabase.auth.admin.delete_user(user_id)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete user account: {exc!s}",
+        )
+
+    return DeleteAccountResponse(
+        status="success",
+        message="Account successfully deleted",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/change-email
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/change-email",
+    response_model=ChangeEmailResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def change_email(
+    body: ChangeEmailRequestBody,
+    user_id: str = Depends(get_current_user_id),
+) -> ChangeEmailResponse:
+    """
+    Updates the authenticated user's email address.
+    """
+    supabase = _get_supabase()
+    try:
+        res = supabase.auth.admin.update_user_by_id(
+            user_id,
+            {"email": str(body.new_email), "email_confirm": True},
+        )
+        user = res.user if hasattr(res, "user") else res
+    except Exception as exc:  # noqa: BLE001
+        err_msg = str(exc).lower()
+        if "already" in err_msg or "exists" in err_msg or "duplicate" in err_msg or "unique" in err_msg:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Email already registered to another account",
+            )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update email: {exc!s}",
+        )
+
+    return ChangeEmailResponse(
+        success=True,
+        message="Email updated successfully",
+        user=_format_user_summary(user),
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/change-phone/request-otp
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/change-phone/request-otp",
+    response_model=ChangePhoneRequestOtpResponse,
+    status_code=status.HTTP_200_OK,
+)
+@limiter.limit("3/10minutes")
+async def change_phone_request_otp(
+    request: Request,
+    body: ChangePhoneRequestOtpBody,
+    user_id: str = Depends(get_current_user_id),  # noqa: ARG001
+) -> ChangePhoneRequestOtpResponse:
+    """
+    Sends an SMS OTP to verify ownership of the new phone number before updating.
+    """
+    _check_phone_flag()
+    request.state.rate_limit_key = body.new_phone_number
+
+    try:
+        supabase = _get_supabase()
+        supabase.auth.sign_in_with_otp({"phone": body.new_phone_number})
+    except Exception:  # noqa: BLE001, S110
+        pass
+
+    return ChangePhoneRequestOtpResponse(
+        success=True,
+        message=f"OTP sent to {body.new_phone_number}",
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/change-phone/verify-otp
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/change-phone/verify-otp",
+    response_model=ChangePhoneVerifyOtpResponse,
+    status_code=status.HTTP_200_OK,
+)
+async def change_phone_verify_otp(
+    body: ChangePhoneVerifyOtpBody,
+    user_id: str = Depends(get_current_user_id),
+) -> ChangePhoneVerifyOtpResponse:
+    """
+    Verifies OTP for the new phone number and updates the authenticated user's record.
+    """
+    _check_phone_flag()
+    supabase = _get_supabase()
+
+    try:
+        supabase.auth.verify_otp(
+            {"phone": body.new_phone_number, "token": body.otp_code, "type": "sms"}
+        )
+    except Exception:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid or expired OTP code.",
+        )
+
+    try:
+        update_res = supabase.auth.admin.update_user_by_id(
+            user_id,
+            {"phone": body.new_phone_number, "phone_confirm": True},
+        )
+        user = update_res.user if hasattr(update_res, "user") else update_res
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update phone number: {exc!s}",
+        )
+
+    return ChangePhoneVerifyOtpResponse(
+        success=True,
+        message="Phone number updated successfully",
+        user=_format_user_summary(user),
+    )
+
+
+

@@ -27,10 +27,10 @@ from fastapi.testclient import TestClient
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _make_valid_jwt(secret: str = "testsecret") -> str:
+def _make_valid_jwt(secret: str = "testsecret", sub: str = "user-uuid-1234") -> str:
     """Return a syntactically valid HS256 JWT with a future expiry."""
     payload = {
-        "sub": "user-uuid-1234",
+        "sub": sub,
         "exp": int(time.time()) + 3600,
         "iat": int(time.time()),
     }
@@ -402,3 +402,434 @@ class TestRequestValidation:
             response = client.post("/auth/request-otp", json={})
 
         assert response.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Forgot password tests
+# ---------------------------------------------------------------------------
+
+class TestForgotPassword:
+    def test_forgot_password_success(self):
+        """Valid email triggers Supabase reset password and returns 200 OK."""
+        email = "farmer@example.com"
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_auth = MagicMock()
+            mock_auth.reset_password_for_email.return_value = None
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                from routers.auth import limiter
+
+                if getattr(limiter, "_storage", None):
+                    limiter._storage.reset()
+
+                client = TestClient(app, raise_server_exceptions=False)
+                response = client.post(
+                    "/auth/forgot-password",
+                    json={"email": email},
+                )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert "password reset instructions" in body["message"].lower()
+        mock_auth.reset_password_for_email.assert_called_once_with(email)
+
+    def test_forgot_password_suppresses_supabase_errors(self):
+        """Supabase exceptions (e.g. unknown email, network error) still return 200 OK."""
+        email = "unregistered@example.com"
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_auth = MagicMock()
+            mock_auth.reset_password_for_email.side_effect = RuntimeError("User not found")
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                from routers.auth import limiter
+
+                if getattr(limiter, "_storage", None):
+                    limiter._storage.reset()
+
+                client = TestClient(app, raise_server_exceptions=False)
+                response = client.post(
+                    "/auth/forgot-password",
+                    json={"email": email},
+                )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert "password reset instructions" in body["message"].lower()
+
+    def test_forgot_password_rate_limiting(self):
+        """4th forgot-password request for same email within 10 minutes returns 429."""
+        email = "rate-limit-fp@example.com"
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_auth = MagicMock()
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                from routers.auth import limiter
+
+                if getattr(limiter, "_storage", None):
+                    limiter._storage.reset()
+
+                client = TestClient(app, raise_server_exceptions=False)
+
+                for i in range(3):
+                    res = client.post("/auth/forgot-password", json={"email": email})
+                    assert res.status_code == 200, f"Request {i+1} failed with {res.status_code}"
+
+                res4 = client.post("/auth/forgot-password", json={"email": email})
+                assert res4.status_code == 429
+
+    def test_forgot_password_invalid_email_format_returns_422(self):
+        """Invalid email format triggers Pydantic 422 Unprocessable Entity."""
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/forgot-password",
+                json={"email": "invalid-email-format"},
+            )
+
+        assert response.status_code == 422
+        body = response.json()
+        assert "detail" in body
+
+    def test_forgot_password_missing_body_returns_422(self):
+        """Missing email in body triggers 422 Unprocessable Entity."""
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/forgot-password",
+                json={},
+            )
+
+        assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# Delete account tests
+# ---------------------------------------------------------------------------
+
+class TestDeleteAccount:
+    def test_delete_account_success(self):
+        """Authenticated user successfully deletes account and cascades user data."""
+        user_id = "user-uuid-1234"
+        valid_jwt = _make_valid_jwt(secret="testsecret")
+
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_admin = MagicMock()
+            mock_admin.delete_user.return_value = None
+
+            mock_auth = MagicMock()
+            mock_auth.admin = mock_admin
+
+            mock_table = MagicMock()
+            mock_table.delete.return_value = mock_table
+            mock_table.eq.return_value = mock_table
+            mock_table.execute.return_value = MagicMock(data=[])
+
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+            mock_supabase.table.return_value = mock_table
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                client = TestClient(app, raise_server_exceptions=False)
+                response = client.delete(
+                    "/auth/account",
+                    headers={"Authorization": f"Bearer {valid_jwt}"},
+                )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert "deleted" in body["message"].lower()
+        mock_admin.delete_user.assert_called_once_with(user_id)
+
+    def test_delete_account_without_jwt_returns_401(self):
+        """Unauthenticated request is rejected with 401."""
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.delete("/auth/account")
+
+        assert response.status_code == 401
+
+    def test_delete_account_admin_failure_returns_500(self):
+        """If Supabase admin delete fails, 500 is returned."""
+        valid_jwt = _make_valid_jwt(secret="testsecret")
+
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_admin = MagicMock()
+            mock_admin.delete_user.side_effect = RuntimeError("Supabase admin delete error")
+
+            mock_auth = MagicMock()
+            mock_auth.admin = mock_admin
+
+            mock_table = MagicMock()
+            mock_table.delete.return_value = mock_table
+            mock_table.eq.return_value = mock_table
+            mock_table.execute.return_value = MagicMock(data=[])
+
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+            mock_supabase.table.return_value = mock_table
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                client = TestClient(app, raise_server_exceptions=False)
+                response = client.delete(
+                    "/auth/account",
+                    headers={"Authorization": f"Bearer {valid_jwt}"},
+                )
+
+        assert response.status_code == 500
+        assert "Failed to delete user account" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Change Email tests
+# ---------------------------------------------------------------------------
+
+class TestChangeEmail:
+    def test_change_email_success(self):
+        """Authenticated user successfully updates their email."""
+        valid_jwt = _make_valid_jwt(secret="testsecret", sub="usr-123")
+
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_admin = MagicMock()
+            mock_user = MagicMock()
+            mock_user.id = "usr-123"
+            mock_user.email = "farmer.new@example.com"
+            mock_user.phone = "+94771234567"
+            mock_user.updated_at = "2026-08-25T12:00:00Z"
+            mock_admin.update_user_by_id.return_value = MagicMock(user=mock_user)
+
+            mock_auth = MagicMock()
+            mock_auth.admin = mock_admin
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                client = TestClient(app, raise_server_exceptions=False)
+                response = client.post(
+                    "/auth/change-email",
+                    headers={"Authorization": f"Bearer {valid_jwt}"},
+                    json={"new_email": "farmer.new@example.com"},
+                )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["message"] == "Email updated successfully"
+        assert body["user"]["id"] == "usr-123"
+        assert body["user"]["email"] == "farmer.new@example.com"
+        assert body["user"]["phone_number"] == "+94771234567"
+        mock_admin.update_user_by_id.assert_called_once_with(
+            "usr-123",
+            {"email": "farmer.new@example.com", "email_confirm": True},
+        )
+
+    def test_change_email_duplicate_returns_409(self):
+        """If new email is already registered, returns 409 Conflict."""
+        valid_jwt = _make_valid_jwt(secret="testsecret", sub="usr-123")
+
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = "fake-key"
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            mock_admin = MagicMock()
+            mock_admin.update_user_by_id.side_effect = RuntimeError("Email already in use")
+
+            mock_auth = MagicMock()
+            mock_auth.admin = mock_admin
+            mock_supabase = MagicMock()
+            mock_supabase.auth = mock_auth
+
+            with patch("routers.auth.create_client", return_value=mock_supabase):
+                from main import app
+                client = TestClient(app, raise_server_exceptions=False)
+                response = client.post(
+                    "/auth/change-email",
+                    headers={"Authorization": f"Bearer {valid_jwt}"},
+                    json={"new_email": "farmer.taken@example.com"},
+                )
+
+        assert response.status_code == 409
+        assert "Email already registered" in response.json()["detail"]
+
+    def test_change_email_unauthenticated_returns_401(self):
+        """Unauthenticated request to change-email is rejected."""
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_jwt_secret = "testsecret"
+
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/change-email",
+                json={"new_email": "farmer.new@example.com"},
+            )
+
+        assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Change Phone OTP tests
+# ---------------------------------------------------------------------------
+
+class TestChangePhone:
+    def test_request_otp_phone_flag_off_returns_403(self):
+        """When PHONE_AUTH_ENABLED is False, request OTP returns 403."""
+        valid_jwt = _make_valid_jwt(secret="testsecret", sub="usr-123")
+
+        with patch("routers.auth.settings.phone_auth_enabled", False):
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/change-phone/request-otp",
+                headers={"Authorization": f"Bearer {valid_jwt}"},
+                json={"new_phone_number": "+94779876543"},
+            )
+
+        assert response.status_code == 403
+
+    def test_request_otp_phone_flag_on_success(self):
+        """When PHONE_AUTH_ENABLED is True, sends OTP and returns 200."""
+        valid_jwt = _make_valid_jwt(secret="testsecret", sub="usr-123")
+
+        mock_auth = MagicMock()
+        mock_supabase = MagicMock()
+        mock_supabase.auth = mock_auth
+
+        with (
+            patch("routers.auth.settings.phone_auth_enabled", True),
+            patch("routers.auth.create_client", return_value=mock_supabase),
+        ):
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/change-phone/request-otp",
+                headers={"Authorization": f"Bearer {valid_jwt}"},
+                json={"new_phone_number": "+94779876543"},
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert "+94779876543" in body["message"]
+        mock_auth.sign_in_with_otp.assert_called_once_with({"phone": "+94779876543"})
+
+    def test_verify_otp_wrong_code_returns_400(self):
+        """Invalid OTP code returns 400."""
+        valid_jwt = _make_valid_jwt(secret="testsecret", sub="usr-123")
+
+        mock_auth = MagicMock()
+        mock_auth.verify_otp.side_effect = RuntimeError("Invalid OTP")
+        mock_supabase = MagicMock()
+        mock_supabase.auth = mock_auth
+
+        with (
+            patch("routers.auth.settings.phone_auth_enabled", True),
+            patch("routers.auth.create_client", return_value=mock_supabase),
+        ):
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/change-phone/verify-otp",
+                headers={"Authorization": f"Bearer {valid_jwt}"},
+                json={"new_phone_number": "+94779876543", "otp_code": "000000"},
+            )
+
+        assert response.status_code == 400
+        assert "Invalid or expired OTP" in response.json()["detail"]
+
+    def test_verify_otp_success_updates_user(self):
+        """Valid OTP code updates user phone and returns 200."""
+        valid_jwt = _make_valid_jwt(secret="testsecret", sub="usr-123")
+
+        mock_user = MagicMock()
+        mock_user.id = "usr-123"
+        mock_user.email = "farmer.new@example.com"
+        mock_user.phone = "+94779876543"
+        mock_user.updated_at = "2026-08-25T12:00:00Z"
+
+        mock_admin = MagicMock()
+        mock_admin.update_user_by_id.return_value = MagicMock(user=mock_user)
+
+        mock_auth = MagicMock()
+        mock_auth.verify_otp.return_value = MagicMock()
+        mock_auth.admin = mock_admin
+
+        mock_supabase = MagicMock()
+        mock_supabase.auth = mock_auth
+
+        with (
+            patch("routers.auth.settings.phone_auth_enabled", True),
+            patch("routers.auth.create_client", return_value=mock_supabase),
+        ):
+            from main import app
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/auth/change-phone/verify-otp",
+                headers={"Authorization": f"Bearer {valid_jwt}"},
+                json={"new_phone_number": "+94779876543", "otp_code": "123456"},
+            )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["success"] is True
+        assert body["message"] == "Phone number updated successfully"
+        assert body["user"]["phone_number"] == "+94779876543"
+        mock_admin.update_user_by_id.assert_called_once_with(
+            "usr-123",
+            {"phone": "+94779876543", "phone_confirm": True},
+        )
+
+
+
+

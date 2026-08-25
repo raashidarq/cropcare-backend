@@ -109,6 +109,47 @@ class TestSyncSecurityScoping:
         assert record["local_scan_id"] == "loc-scan-99"
 
     @patch("routers.sync._get_supabase")
+    def test_scan_sync_accepts_unknown_and_derived_crop_id(self, mock_get_supabase):
+        """
+        Verifies scan sync handles crop_id: 'unknown' (pre-inference or unsupported)
+        and derived crop_id strings (e.g. 'tomato').
+        """
+        mock_supabase = MagicMock()
+        mock_table = MagicMock()
+        mock_table.upsert.return_value.execute.return_value = MagicMock(data=[{"id": "scan-uuid-1"}])
+        mock_supabase.table.return_value = mock_table
+        mock_get_supabase.return_value = mock_supabase
+
+        token = _make_valid_jwt(sub="farmer-uuid")
+
+        # Case 1: Pre-inference or unsupported fallback ("unknown")
+        payload_unknown = {
+            "id": "scan-uuid-1",
+            "local_scan_id": "loc-uuid-1",
+            "crop_id": "unknown",
+            "image_url": "farmer-uuid/scan-uuid-1.jpg",
+            "status": "COMPLETED",
+        }
+        res1 = client.post("/scans", json=payload_unknown, headers={"Authorization": f"Bearer {token}"})
+        assert res1.status_code == 200
+        record1 = mock_table.upsert.call_args_list[-1][0][0]
+        assert record1["crop_id"] == "unknown"
+        assert record1["status"] == "COMPLETED"
+
+        # Case 2: Derived crop_id (e.g. "tomato")
+        payload_derived = {
+            "id": "scan-uuid-2",
+            "local_scan_id": "loc-uuid-2",
+            "crop_id": "tomato",
+            "image_url": "farmer-uuid/scan-uuid-2.jpg",
+            "status": "COMPLETED",
+        }
+        res2 = client.post("/scans", json=payload_derived, headers={"Authorization": f"Bearer {token}"})
+        assert res2.status_code == 200
+        record2 = mock_table.upsert.call_args_list[-1][0][0]
+        assert record2["crop_id"] == "tomato"
+
+    @patch("routers.sync._get_supabase")
     def test_diagnosis_sync_scopes_to_jwt_user(self, mock_get_supabase):
         mock_supabase = MagicMock()
         mock_table = MagicMock()

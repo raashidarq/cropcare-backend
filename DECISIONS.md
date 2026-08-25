@@ -133,3 +133,48 @@ This log records major architectural and technical decisions made in the CropCar
 - Reference tables (`crop`, `disease`, `treatment_guideline`, `model_version`) allow public read (`USING (true)`) and restrict writes to service role / admin.
 - DDL and RLS definitions are applied directly to Supabase Cloud via SQL Editor.
 
+---
+
+### TD-013 · Password Reset (`POST /auth/forgot-password`) & Anti-Enumeration
+
+**Date:** 2026-08-25  
+**Decision:**
+- Added `POST /auth/forgot-password` accepting `{"email": "farmer@example.com"}`.
+- Relays to Supabase Auth (`supabase.auth.reset_password_for_email`).
+- **Anti-Enumeration & Security:** Unconditionally returns HTTP `200 OK` with `{"message": "If an account exists with this email, password reset instructions have been sent.", "status": "success"}` even if the email does not exist in Supabase or an error is thrown.
+- **Rate-Limiting:** Enforces 3 requests / 10 minutes per email address using SlowAPI.
+
+---
+
+### TD-014 · Account Deletion & User Sync Cleanup (`DELETE /auth/account`)
+
+**Date:** 2026-08-25  
+**Decision:**
+- Added `DELETE /auth/account` protected by `get_current_user_id` Bearer JWT dependency.
+- Cascades user-scoped data deletions across `scan`, `diagnosis`, `escalation`, `profile`, and `llm_interpretation` tables.
+- Invokes Supabase Auth Admin API (`supabase.auth.admin.delete_user(user_id)`) to remove authentication record.
+- Returns HTTP `200 OK` with `{"status": "success", "message": "Account successfully deleted"}`.
+
+---
+
+### TD-015 · Resilient In-App User Feedback (`POST /feedback`)
+
+**Date:** 2026-08-25  
+**Decision:**
+- Added `POST /feedback` supporting bug reports, feature suggestions, and general user feedback.
+- Dual authentication support: accepts guest feedback as well as authenticated submissions (via `get_optional_user_id`), automatically binding the JWT `user_id` when present.
+- Non-blocking persistence: records are inserted into Supabase `feedback` table with resilient error handling ensuring client responses never crash due to database latency.
+
+---
+
+### TD-016 · Authenticated Email & Phone Modification (`POST /auth/change-email`, `/change-phone/*`)
+
+**Date:** 2026-08-25  
+**Decision:**
+- Added `POST /auth/change-email` allowing authenticated users to update their email address via `supabase.auth.admin.update_user_by_id`, returning `409 Conflict` if the email is already registered.
+- Added `POST /auth/change-phone/request-otp` and `POST /auth/change-phone/verify-otp` to safely verify ownership of a new phone number via SMS OTP before persisting the phone update to the user record.
+- Both phone change endpoints strictly respect the `PHONE_AUTH_ENABLED` feature flag and SlowAPI rate limiting (3 requests / 10 min).
+
+
+
+
