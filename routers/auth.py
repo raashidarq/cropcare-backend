@@ -79,6 +79,30 @@ def _get_supabase() -> Client:
 # Request / response models
 # ---------------------------------------------------------------------------
 
+class EmailPasswordBody(BaseModel):
+    email: EmailStr
+    # Supabase enforces its own minimum; this only stops obviously empty
+    # submissions reaching it.
+    password: str = Field(..., min_length=8, max_length=128)
+
+
+class SessionResponse(BaseModel):
+    """The shape the app's AuthResponse.fromJson expects.
+
+    user_id and email are included deliberately: verify-otp returned only the
+    tokens, so the app built a LocalUser with an empty id and had no way to
+    know who had just signed in.
+    """
+
+    user_id: str
+    email: str | None = None
+    phone_number: str | None = None
+    access_token: str
+    refresh_token: str | None = None
+    token_type: str = "bearer"
+    expires_in: int = 3600
+
+
 class OtpRequestBody(BaseModel):
     email: EmailStr | None = None
     phone: str | None = None
@@ -198,6 +222,114 @@ def _check_phone_flag() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Session helper
+# ---------------------------------------------------------------------------
+def _session_response(response, fallback_email: str | None = None) -> SessionResponse:
+    """Turns a Supabase auth response into what the app expects.
+
+    Raises 401 if there is no session. Sign-up returns a user with no session
+    when the project requires email confirmation, and telling the app it
+    succeeded would leave the farmer looking at a signed-out app that thinks
+    it is signed in.
+    """
+    session = getattr(response, "session", None)
+    user = getattr(response, "user", None)
+
+    if session is None or not getattr(session, "access_token", None):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=(
+                "Account created. Please confirm your email address, then sign in."
+                if user is not None
+                else "Could not sign in. Check your details and try again."
+            ),
+        )
+
+    expires_in = getattr(session, "expires_in", None) or 3600
+
+    return SessionResponse(
+        user_id=getattr(user, "id", "") or "",
+        email=getattr(user, "email", None) or fallback_email,
+        phone_number=getattr(user, "phone", None) or None,
+        access_token=session.access_token,
+        refresh_token=getattr(session, "refresh_token", None),
+        expires_in=expires_in,
+    )
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/register
+# ---------------------------------------------------------------------------
+@router.post("/register", response_model=SessionResponse, status_code=status.HTTP_200_OK)
+@limiter.limit("5/10minutes")
+async def register(request: Request, body: EmailPasswordBody) -> SessionResponse:
+    """
+    Create an account with email and password.
+
+    This endpoint did not exist. The app has always called /auth/register, so
+    account creation returned 404 and no one could sign up at all.
+
+    Rate limited per email rather than per IP: a village sharing one connection
+    should not lock each other out.
+    """
+    request.state.rate_limit_key = body.email
+
+    try:
+        supabase = _get_supabase()
+        response = supabase.auth.sign_up(
+            {"email": body.email, "password": body.password}
+        )
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc).lower()
+        # The one case worth distinguishing: telling someone their account
+        # already exists is a usable instruction, not an information leak
+        # they could not get by trying to sign in.
+        if "already" in message or "registered" in message:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An account with that email already exists. Try signing in.",
+            )
+        logger.warning("Registration failed for %s: %s", body.email, exc)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Could not create that account. Check your details and try again.",
+        )
+
+    return _session_response(response, fallback_email=body.email)
+
+
+# ---------------------------------------------------------------------------
+# POST /auth/login
+# ---------------------------------------------------------------------------
+@router.post("/login", response_model=SessionResponse, status_code=status.HTTP_200_OK)
+@limiter.limit("10/10minutes")
+async def login(request: Request, body: EmailPasswordBody) -> SessionResponse:
+    """
+    Sign in with email and password.
+
+    Also missing until now, so signing in returned 404.
+
+    Every failure returns the same 401. Distinguishing "no such account" from
+    "wrong password" tells an attacker which emails are registered.
+    """
+    request.state.rate_limit_key = body.email
+
+    try:
+        supabase = _get_supabase()
+        response = supabase.auth.sign_in_with_password(
+            {"email": body.email, "password": body.password}
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Login failed for %s: %s", body.email, exc)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Email or password is incorrect.",
+        )
+
+    return _session_response(response, fallback_email=body.email)
+
+
+# ---------------------------------------------------------------------------
 # POST /auth/request-otp
 # ---------------------------------------------------------------------------
 
@@ -286,10 +418,17 @@ async def verify_otp(body: OtpVerifyBody) -> dict:
             detail="OTP verification failed.",
         )
 
+    # Returns user_id and identifier alongside the tokens. It used to return
+    # tokens only, so the app built a LocalUser with an empty id.
+    user = getattr(response, "user", None)
     return {
+        "user_id": getattr(user, "id", "") or "",
+        "email": getattr(user, "email", None),
+        "phone_number": getattr(user, "phone", None),
         "access_token": session.access_token,
         "refresh_token": session.refresh_token,
-        "expires_at": session.expires_at,
+        "token_type": "bearer",
+        "expires_in": getattr(session, "expires_in", None) or 3600,
     }
 
 
