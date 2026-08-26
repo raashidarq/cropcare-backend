@@ -22,6 +22,10 @@ class _Settings:
         )
         self.supabase_jwt_secret: str = os.environ.get("SUPABASE_JWT_SECRET", "")
         self.gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
+        # Configurable so a retired model name can be changed on the host
+        # without a code change. Empty falls back to the candidate list in
+        # dependencies/gemini.py. See that module for why this exists.
+        self.gemini_model: str = os.environ.get("GEMINI_MODEL", "")
         # Phone auth is DISABLED by default — deliberate cost-control gate.
         # Costs real money per SMS; enable only when explicitly configured.
         self.phone_auth_enabled: bool = (

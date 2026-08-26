@@ -53,13 +53,13 @@ def _mock_gemini(mock_model_cls, text="You can, if you wash and cook it."):
 
 
 class TestChatAboutDiagnosis:
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     @patch("routers.chat._get_supabase")
     def test_answers_a_scoped_question(self, mock_supabase, mock_model_cls):
         _mock_gemini(mock_model_cls)
         mock_supabase.return_value = MagicMock()
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -70,11 +70,11 @@ class TestChatAboutDiagnosis:
         assert data["answer"] == "You can, if you wash and cook it."
         assert data["message_id"]
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_low_confidence_forces_a_stronger_hedge(self, mock_model_cls):
         instance = _mock_gemini(mock_model_cls)
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -90,11 +90,11 @@ class TestChatAboutDiagnosis:
         assert "UNCERTAIN" in prompt
         assert "agronomist" in prompt
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_confident_result_still_refuses_to_sound_certain(self, mock_model_cls):
         instance = _mock_gemini(mock_model_cls)
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -103,11 +103,11 @@ class TestChatAboutDiagnosis:
         prompt = instance.generate_content.call_args[0][0]
         assert "Do not present it as certain" in prompt
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_prompt_is_scoped_to_the_one_diagnosis(self, mock_model_cls):
         instance = _mock_gemini(mock_model_cls)
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -117,11 +117,11 @@ class TestChatAboutDiagnosis:
         assert "only help with this scan" in prompt
         assert "tomato_late_blight" in prompt
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_answers_in_the_requested_language(self, mock_model_cls):
         instance = _mock_gemini(mock_model_cls)
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -130,7 +130,7 @@ class TestChatAboutDiagnosis:
         prompt = instance.generate_content.call_args[0][0]
         assert "Sinhala" in prompt
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_history_is_included_and_capped(self, mock_model_cls):
         instance = _mock_gemini(mock_model_cls)
         history = [
@@ -138,7 +138,7 @@ class TestChatAboutDiagnosis:
             for i in range(40)
         ]
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -154,11 +154,11 @@ class TestChatAboutDiagnosis:
         assert "msg0:" not in prompt
         assert "msg19" not in prompt
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_observations_and_shown_treatment_reach_the_prompt(self, mock_model_cls):
         instance = _mock_gemini(mock_model_cls)
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -176,9 +176,9 @@ class TestChatAboutDiagnosis:
         assert "Remove infected leaves and spray copper." in prompt
 
     def test_authenticated_request_is_accepted(self):
-        with patch("routers.chat.genai.GenerativeModel") as mock_model_cls:
+        with patch("dependencies.gemini.genai.GenerativeModel") as mock_model_cls:
             _mock_gemini(mock_model_cls)
-            with patch("routers.chat.settings") as mock_settings:
+            with patch("dependencies.gemini.settings") as mock_settings:
                 mock_settings.gemini_api_key = "test-key"
                 mock_settings.supabase_url = ""
                 mock_settings.supabase_service_role_key = ""
@@ -210,28 +210,28 @@ class TestChatAboutDiagnosis:
         assert response.status_code == 422
 
     def test_missing_api_key_is_a_500(self):
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = ""
             response = client.post("/chat-about-diagnosis", json=_payload())
         assert response.status_code == 500
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_model_failure_is_a_500(self, mock_model_cls):
         mock_instance = MagicMock()
         mock_instance.generate_content.side_effect = RuntimeError("timeout")
         mock_model_cls.return_value = mock_instance
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             response = client.post("/chat-about-diagnosis", json=_payload())
 
         assert response.status_code == 500
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_empty_model_answer_is_a_500_not_an_empty_bubble(self, mock_model_cls):
         _mock_gemini(mock_model_cls, text="   ")
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -239,7 +239,7 @@ class TestChatAboutDiagnosis:
 
         assert response.status_code == 500
 
-    @patch("routers.chat.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     @patch("routers.chat._get_supabase")
     def test_audit_log_failure_does_not_fail_the_request(
         self, mock_get_supabase, mock_model_cls
@@ -247,7 +247,7 @@ class TestChatAboutDiagnosis:
         _mock_gemini(mock_model_cls)
         mock_get_supabase.side_effect = RuntimeError("supabase down")
 
-        with patch("routers.chat.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = "https://example.supabase.co"
             mock_settings.supabase_service_role_key = "service-key"

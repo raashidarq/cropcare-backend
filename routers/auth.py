@@ -30,6 +30,7 @@ Supabase OTP types
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -61,6 +62,8 @@ def _identifier_key(request: Request) -> str:
 
 
 limiter = Limiter(key_func=_identifier_key)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -365,8 +368,15 @@ async def delete_account(
     ]:
         try:
             supabase.table(table_name).delete().eq("user_id", user_id).execute()
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as exc:  # noqa: BLE001
+            # Deletion continues across the remaining tables rather than
+            # aborting: a partial cascade is bad, but stopping halfway would
+            # leave MORE of the user's data behind. Logged because a silently
+            # failed account deletion is a data-rights problem, not a nuisance.
+            logger.warning(
+                "Account deletion: could not clear %s for user %s: %s",
+                table_name, user_id, exc,
+            )
 
     # Delete user from Supabase Auth via Admin API
     try:
@@ -438,7 +448,7 @@ async def change_email(
 async def change_phone_request_otp(
     request: Request,
     body: ChangePhoneRequestOtpBody,
-    user_id: str = Depends(get_current_user_id),  # noqa: ARG001
+    user_id: str = Depends(get_current_user_id),
 ) -> ChangePhoneRequestOtpResponse:
     """
     Sends an SMS OTP to verify ownership of the new phone number before updating.

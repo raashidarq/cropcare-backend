@@ -13,13 +13,13 @@ import logging
 import uuid
 from typing import Any
 
-import google.generativeai as genai
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from slowapi.util import get_remote_address
 from supabase import Client, create_client
 
 from config import settings
+from dependencies import gemini
 from dependencies.jwt_auth import get_optional_user_id
 from routers.auth import limiter
 
@@ -218,13 +218,7 @@ async def interpret_diagnosis(
     prompt = _build_prompt(body)
 
     try:
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config={"response_mime_type": "application/json"},
-        )
-        response = model.generate_content(prompt)
-        raw_text = response.text or "{}"
+        raw_text = gemini.generate(prompt, json_mode=True) or "{}"
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
         raise HTTPException(

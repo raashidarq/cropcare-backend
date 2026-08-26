@@ -57,11 +57,11 @@ _GOOD = {
 
 
 class TestStepShapedGuidance:
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_steps_are_returned_as_a_list(self, mock_model_cls):
         _mock_gemini(mock_model_cls, _GOOD)
 
-        with patch("routers.diagnosis.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -72,11 +72,11 @@ class TestStepShapedGuidance:
         assert data["what_to_do_steps"] == _GOOD["what_to_do_steps"]
         assert data["what_to_avoid_steps"] == _GOOD["what_to_avoid_steps"]
 
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_prose_fields_are_derived_for_older_clients(self, mock_model_cls):
         _mock_gemini(mock_model_cls, _GOOD)
 
-        with patch("routers.diagnosis.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""
@@ -87,7 +87,7 @@ class TestStepShapedGuidance:
         assert "Remove and burn infected leaves today." in data["what_to_do"]
         assert "Do not compost infected plants." in data["what_to_avoid"]
 
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_a_model_that_ignores_the_schema_still_works(self, mock_model_cls):
         # LLMs return the wrong shape often enough that this must not 500.
         _mock_gemini(
@@ -100,7 +100,7 @@ class TestStepShapedGuidance:
             },
         )
 
-        with patch("routers.diagnosis.settings") as mock_settings:
+        with patch("dependencies.gemini.settings") as mock_settings:
             mock_settings.gemini_api_key = "test-key"
             mock_settings.supabase_url = ""
             mock_settings.supabase_service_role_key = ""

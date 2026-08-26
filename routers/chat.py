@@ -28,13 +28,13 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
-import google.generativeai as genai
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from slowapi.util import get_remote_address
 from supabase import Client, create_client
 
 from config import settings
+from dependencies import gemini
 from dependencies.jwt_auth import get_optional_user_id
 from routers.auth import limiter
 
@@ -194,10 +194,7 @@ async def chat_about_diagnosis(
     prompt = _build_prompt(body)
 
     try:
-        genai.configure(api_key=settings.gemini_api_key)
-        model = genai.GenerativeModel(model_name="gemini-1.5-flash")
-        response = model.generate_content(prompt)
-        answer = (response.text or "").strip()
+        answer = (gemini.generate(prompt) or "").strip()
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

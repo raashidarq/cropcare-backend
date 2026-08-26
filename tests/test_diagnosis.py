@@ -38,7 +38,7 @@ def _make_valid_jwt(secret: str = "testsecret", sub: str = "user-uuid-1234") -> 
 
 
 class TestInterpretDiagnosis:
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     @patch("routers.diagnosis._get_supabase")
     def test_successful_interpretation(self, mock_get_supabase, mock_model_cls):
         mock_response = MagicMock()
@@ -78,7 +78,7 @@ class TestInterpretDiagnosis:
         # Verify Supabase audit logging was triggered
         mock_supabase.table.assert_called_with("llm_interpretation")
 
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     @patch("routers.diagnosis._get_supabase")
     def test_interpretation_with_authenticated_user(self, mock_get_supabase, mock_model_cls):
         mock_response = MagicMock()
@@ -142,7 +142,7 @@ class TestInterpretDiagnosis:
         )
         assert response.status_code == 422
 
-    @patch("routers.diagnosis.settings")
+    @patch("dependencies.gemini.settings")
     def test_gemini_missing_api_key(self, mock_settings):
         mock_settings.gemini_api_key = ""
         payload = {
@@ -155,7 +155,7 @@ class TestInterpretDiagnosis:
         assert response.status_code == 500
         assert "Gemini API key is not configured" in response.json()["detail"]
 
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_gemini_api_exception(self, mock_model_cls):
         mock_instance = MagicMock()
         mock_instance.generate_content.side_effect = RuntimeError("API Quota exceeded")
@@ -171,7 +171,7 @@ class TestInterpretDiagnosis:
         assert response.status_code == 500
         assert "Failed to generate treatment guidance" in response.json()["detail"]
 
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_gemini_malformed_json_response(self, mock_model_cls):
         mock_response = MagicMock()
         mock_response.text = "This is not JSON at all."
@@ -189,7 +189,7 @@ class TestInterpretDiagnosis:
         assert response.status_code == 500
         assert "Received malformed JSON" in response.json()["detail"]
 
-    @patch("routers.diagnosis.genai.GenerativeModel")
+    @patch("dependencies.gemini.genai.GenerativeModel")
     def test_gemini_missing_required_guidance_fields(self, mock_model_cls):
         mock_response = MagicMock()
         mock_response.text = json.dumps({"summary": "Incomplete data."})
