@@ -346,8 +346,23 @@ async def delete_account(
     """
     supabase = _get_supabase()
 
-    # Cascade deletion across user-scoped data tables
-    for table_name in ["scan", "diagnosis", "escalation", "profile", "llm_interpretation"]:
+    # Cascade deletion across user-scoped data tables.
+    #
+    # chat_message_log was added with the chat endpoint and belongs here for
+    # the same reason as llm_interpretation: it holds the farmer's own words.
+    #
+    # NOTE: this removes database rows only. Scan images live in Supabase
+    # Storage and are NOT deleted here, so a user who deletes their account
+    # still leaves their photographs in the bucket. That needs a storage
+    # sweep before this can be called a complete deletion.
+    for table_name in [
+        "scan",
+        "diagnosis",
+        "escalation",
+        "profile",
+        "llm_interpretation",
+        "chat_message_log",
+    ]:
         try:
             supabase.table(table_name).delete().eq("user_id", user_id).execute()
         except Exception:  # noqa: BLE001
