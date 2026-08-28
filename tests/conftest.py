@@ -13,7 +13,9 @@ be its own fixture rather than folded into _safe_env.
 """
 
 import os
+from unittest.mock import patch
 
+import jwt
 import pytest
 
 import config as app_config
@@ -80,4 +82,28 @@ def _clear_nvidia_key(monkeypatch):
     """
     monkeypatch.delenv("NVIDIA_API_KEY", raising=False)
     app_config.settings.nvidia_api_key = ""
+
+
+@pytest.fixture(autouse=True)
+def _stub_jwks_client():
+    """Guarantees dependencies.jwt_auth never makes a real network call.
+
+    That module tries Supabase's JWKS endpoint first (see its own docstring
+    for why) before falling back to the legacy shared-secret path - every
+    existing test mints an HS256 token expecting exactly that fallback, so
+    without this fixture every one of them would make a real HTTP request
+    to https://test.supabase.co/.../jwks.json before falling through. This
+    makes that lookup fail instantly and deterministically instead, the
+    same way it would in production if a project genuinely has no signing
+    keys configured - no network, no flakiness, no slowdown.
+    """
+    fake_client = object.__new__(jwt.PyJWKClient)
+
+    def _always_fails(token):
+        raise jwt.PyJWKClientError("stubbed for tests - no real JWKS lookup")
+
+    fake_client.get_signing_key_from_jwt = _always_fails
+
+    with patch("dependencies.jwt_auth._get_jwks_client", return_value=fake_client):
+        yield
 

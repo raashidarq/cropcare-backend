@@ -27,7 +27,7 @@ pip install -r requirements.txt
 |---|---|---|
 | `SUPABASE_URL` | yes | |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | server-side key, never the anon key |
-| `SUPABASE_JWT_SECRET` | yes | verifies tokens issued by Supabase Auth |
+| `SUPABASE_JWT_SECRET` | yes | legacy HS256 fallback only — see `dependencies/jwt_auth.py`. The primary path verifies against Supabase's own published public key (`SUPABASE_URL/auth/v1/.well-known/jwks.json`), so this is a safety net, not the thing actually verifying most tokens |
 | `AI_PROVIDER` | no | default `gemini` — which provider handles treatment guidance and chat, see `dependencies/ai/service.py` |
 | `AI_FALLBACK_PROVIDER` | no | default `nvidia` — tried if the primary can't serve a request (misconfigured, out of quota, unreachable). Inert until that provider's own key is set, same as `GEMINI_API_KEY_FALLBACK` always worked |
 | `GEMINI_API_KEY` | yes if `gemini` is in use | a Google AI Studio key |
@@ -44,9 +44,17 @@ dashboard (**Environment** tab), not in a file that could be committed.
 
 No migration files are checked into this repo — the schema was created
 directly in the Supabase SQL editor, which is a real gap for anyone standing
-up a fresh project from scratch. The tables the code reads and writes:
-`scan`, `diagnosis`, `escalation`, `profile`, `llm_interpretation`,
-`chat_message_log`. Each row is scoped by `user_id`.
+up a fresh project from scratch, and turned out to be a real gap on THIS
+project too: `chat_message_log` and `feedback` were never actually created,
+so every chat message and every feedback submission returns 200 (the write
+is wrapped in a best-effort try/except specifically so a logging failure
+never fails the farmer's real request) while silently writing nothing. If
+a feature "says success but goes nowhere," check the relevant table exists
+in Supabase's own Table Editor before suspecting the application code.
+
+The tables the code reads and writes: `scan`, `diagnosis`, `escalation`,
+`profile`, `llm_interpretation`, `chat_message_log`, `feedback`. Each row
+is scoped by `user_id`.
 
 ### Run
 
@@ -57,7 +65,7 @@ uvicorn main:app --reload
 ## Testing
 
 ```bash
-python -m pytest -q      # 198 passing, 2 skipped at time of writing
+python -m pytest -q      # 202 passing, 2 skipped at time of writing
 ruff check .              # must stay clean — this is what CI runs
 ```
 
@@ -170,6 +178,26 @@ than trying to make one provider's limit stretch further.
   timeout, a stalled connection to Google's API hung `/interpret-diagnosis`
   and `/chat-about-diagnosis` past three minutes with zero response — worse
   than a fast, clean failure the on-device fallback can absorb.
+
+## JWT verification — two paths, not one
+
+`dependencies/jwt_auth.py` tries Supabase's asymmetric JWT signing keys
+(ES256) first, verified against the project's public key at
+`SUPABASE_URL/auth/v1/.well-known/jwks.json` — no shared secret involved.
+Only if that lookup itself fails does it fall back to the legacy shared
+`SUPABASE_JWT_SECRET` (HS256).
+
+This was a live, total outage before the fallback ordering was fixed: this
+project's real tokens are ES256-signed — confirmed by decoding a live
+token's header, not assumed — but the code only ever tried to verify them
+as HS256 against the shared secret. That combination cannot succeed no
+matter how correct the secret is or how fresh the token is, so every
+authenticated request from every farmer failed as "session expired,"
+including immediately after a brand new sign-in. If auth ever regresses to
+this exact symptom again — sign-in succeeds, the very next authenticated
+call says the session expired, signing in again does not help — decode the
+token at [jwt.io](https://jwt.io) and check its `alg` header before
+assuming it's a stale-token or clock-skew problem.
 
 ## Reading the codebase
 

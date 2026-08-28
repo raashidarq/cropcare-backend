@@ -360,6 +360,126 @@ class TestJWTProtectedRoute:
         assert response.status_code == 401
 
 
+class TestJWTSigningKeysES256:
+    """
+    Regression coverage for a live production incident: every real token
+    this Supabase project issues is ES256-signed (Supabase's asymmetric JWT
+    signing keys, confirmed by decoding a live token's header, not
+    assumed) - the JWT dependency used to only ever try HS256 against a
+    shared secret, a combination that could never succeed. Every farmer's
+    every authenticated request failed as "session expired", regardless of
+    how fresh the token was or how correct the shared secret was.
+
+    Does not hit a real network: tests/conftest.py's autouse
+    _stub_jwks_client fixture replaces dependencies.jwt_auth._get_jwks_client
+    for every OTHER test in this file; these tests override that stub
+    locally with one that returns a real EC public key, so the ES256 path
+    itself gets exercised, not just its absence.
+    """
+
+    def _build_protected_client(self) -> TestClient:
+        from fastapi import Depends, FastAPI
+
+        from dependencies.jwt_auth import get_current_user_id
+
+        test_app = FastAPI()
+
+        @test_app.get("/protected")
+        def protected(user_id: str = Depends(get_current_user_id)):
+            return {"user_id": user_id}
+
+        return TestClient(test_app, raise_server_exceptions=False)
+
+    def _es256_keypair(self):
+        from cryptography.hazmat.primitives.asymmetric import ec
+
+        private_key = ec.generate_private_key(ec.SECP256R1())
+        return private_key, private_key.public_key()
+
+    def _stub_jwks_returning(self, public_key):
+        """A fake PyJWKClient whose get_signing_key_from_jwt always returns
+        this one EC public key, regardless of the token's kid - enough to
+        exercise the ES256 decode path without a real JWKS fetch."""
+        fake_key = MagicMock()
+        fake_key.key = public_key
+        fake_client = MagicMock()
+        fake_client.get_signing_key_from_jwt.return_value = fake_key
+        return patch("dependencies.jwt_auth._get_jwks_client", return_value=fake_client)
+
+    def test_a_valid_es256_token_succeeds_via_the_jwks_path(self):
+        private_key, public_key = self._es256_keypair()
+        token = jwt.encode(
+            {"sub": "farmer-1", "exp": int(time.time()) + 3600},
+            private_key,
+            algorithm="ES256",
+        )
+
+        with self._stub_jwks_returning(public_key):
+            client = self._build_protected_client()
+            response = client.get(
+                "/protected", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == "farmer-1"
+
+    def test_an_expired_es256_token_is_rejected(self):
+        private_key, public_key = self._es256_keypair()
+        token = jwt.encode(
+            {"sub": "farmer-1", "exp": int(time.time()) - 10},
+            private_key,
+            algorithm="ES256",
+        )
+
+        with self._stub_jwks_returning(public_key):
+            client = self._build_protected_client()
+            response = client.get(
+                "/protected", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 401
+
+    def test_an_es256_token_signed_by_a_different_key_is_rejected(self):
+        # Simulates a forged token: the JWKS lookup returns the PROJECT's
+        # real public key, but the token was signed by some other private
+        # key entirely - the signature must not verify against it.
+        _, real_public_key = self._es256_keypair()
+        attacker_private_key, _ = self._es256_keypair()
+        forged_token = jwt.encode(
+            {"sub": "attacker", "exp": int(time.time()) + 3600},
+            attacker_private_key,
+            algorithm="ES256",
+        )
+
+        with self._stub_jwks_returning(real_public_key):
+            client = self._build_protected_client()
+            response = client.get(
+                "/protected", headers={"Authorization": f"Bearer {forged_token}"}
+            )
+
+        assert response.status_code == 401
+
+    def test_jwks_lookup_failure_falls_through_to_the_legacy_hs256_secret(self):
+        # The exact fallback ordering this module documents: when the JWKS
+        # lookup itself fails (no matching key, endpoint unreachable), an
+        # HS256 token still verifies against the legacy shared secret,
+        # rather than the whole request failing outright.
+        with patch("config.settings") as mock_settings:
+            mock_settings.supabase_jwt_secret = "testsecret"
+            with patch(
+                "dependencies.jwt_auth._get_jwks_client",
+                side_effect=jwt.PyJWKClientError("no matching key"),
+            ):
+                token = _make_valid_jwt(secret="testsecret")
+                client = self._build_protected_client()
+                response = client.get(
+                    "/protected", headers={"Authorization": f"Bearer {token}"}
+                )
+
+        assert response.status_code == 200
+        assert response.json()["user_id"] == "user-uuid-1234"
+
+
 # ---------------------------------------------------------------------------
 # Payload validation tests
 # ---------------------------------------------------------------------------
