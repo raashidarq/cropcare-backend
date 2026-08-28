@@ -7,18 +7,22 @@ along the same line:
 * A hardcoded model name (`gemini-1.5-flash`) was retired by Google, and both
   routers went dark simultaneously with no fix short of a redeploy. That is
   TestModelFallback below.
-* Google AI Studio's free tier is a low daily cap PER KEY. Once the primary
-  key is spent, every further call to it fails identically regardless of
-  which model is asked for - a same-key model swap cannot fix that, only a
-  different key can. That is TestKeyFallback below.
+* Google AI Studio's free tier is a low daily cap PER MODEL PER KEY, not per
+  key. A live rate-limit dashboard proved this: one model sat at 23/20
+  requests for the day while three other candidates on the SAME key sat at
+  0/20, untouched. A same-key model swap fixes a quota error far more often
+  than the code used to assume, and only once every candidate model on a key
+  is exhausted does it move to a second key. That is TestKeyFallback below.
 * A live check against the deployed service found /interpret-diagnosis and
   /chat-about-diagnosis hanging past three minutes with no response at all -
   generate_content() had no timeout, so a stalled connection to Google's API
   hung the whole request indefinitely. That is TestTimeout below.
 
-The two retry axes are independent on purpose: a missing-model error stays on
-the same key and tries the next model; a quota/auth/timeout error abandons
-the remaining models on that key and moves to the next key.
+The two retry axes are independent on purpose: a missing-model error or a
+quota error stays on the same key and tries the next model - both say nothing
+about the other candidates on that key. An auth error (bad or revoked key) or
+a timeout abandons the remaining models on that key and moves to the next key
+- both are properties of the key/connection, not of any one model name.
 """
 
 from __future__ import annotations
@@ -198,7 +202,7 @@ class TestKeyFallback:
     tier runs out mid-demo, and the app keeps answering instead of going
     dark."""
 
-    def test_a_quota_error_switches_to_the_fallback_key(self):
+    def test_a_quota_error_tries_every_model_on_the_same_key_before_switching(self):
         configured_keys = []
 
         def track_configure(api_key):
@@ -220,11 +224,12 @@ class TestKeyFallback:
             result = gemini.generate("p")
 
         assert result == "answered on the fallback key"
-        # Exactly one attempt on the exhausted key, not one per candidate
-        # model - a quota cap fails identically regardless of model name, so
-        # cycling models on it first would only waste the farmer's time.
+        # Every candidate model gets one attempt on the exhausted key before
+        # the fallback key is touched at all - quota is tracked per model, so
+        # a 429 on one candidate says nothing about whether the others still
+        # have budget left.
         primary_attempts = [c for c in calls if c[0] == "primary-key"]
-        assert len(primary_attempts) == 1
+        assert len(primary_attempts) == len(gemini.candidate_models())
 
     def test_an_auth_error_also_switches_keys(self):
         attempt = {"n": 0}
@@ -277,7 +282,7 @@ class TestKeyFallback:
             with pytest.raises(RuntimeError, match="429"):
                 gemini.generate("p")
 
-    def test_with_no_fallback_configured_a_quota_error_fails_fast(self):
+    def test_with_no_fallback_key_a_quota_error_still_tries_every_model(self):
         calls = []
 
         def make(model_name, generation_config=None):
@@ -290,9 +295,10 @@ class TestKeyFallback:
             with pytest.raises(RuntimeError, match="429"):
                 gemini.generate("p")
 
-        # No second key to fall back to, so this degrades to exactly the old
-        # single-key behaviour: one attempt, immediate failure.
-        assert len(calls) == 1
+        # No second key configured doesn't change quota behaviour - every
+        # candidate model on the one available key still gets tried, since
+        # each may have its own untouched daily budget.
+        assert len(calls) == len(gemini.candidate_models())
 
 
 class TestMissingModelDetection:
@@ -315,20 +321,17 @@ class TestMissingModelDetection:
         assert gemini._is_missing_model(RuntimeError(message)) is False
 
 
-class TestQuotaOrAuthDetection:
+class TestQuotaDetection:
     @pytest.mark.parametrize(
         "message",
         [
             "429 Resource has been exhausted (quota)",
             "RESOURCE_EXHAUSTED",
             "rate limit exceeded, try again later",
-            "401 Unauthorized",
-            "403 PERMISSION_DENIED",
-            "API_KEY_INVALID: API key not valid",
         ],
     )
-    def test_recognises_a_key_level_failure(self, message):
-        assert gemini._is_quota_or_auth_error(RuntimeError(message)) is True
+    def test_recognises_a_per_model_quota_failure(self, message):
+        assert gemini._is_quota_error(RuntimeError(message)) is True
 
     @pytest.mark.parametrize(
         "message",
@@ -336,10 +339,37 @@ class TestQuotaOrAuthDetection:
             "404 models/gemini-1.5-flash is not found",
             "500 internal server error",
             "connection reset by peer",
+            "401 Unauthorized",
+            "403 PERMISSION_DENIED",
+        ],
+    )
+    def test_does_not_mistake_other_failures_for_a_quota_problem(self, message):
+        assert gemini._is_quota_error(RuntimeError(message)) is False
+
+
+class TestAuthDetection:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "401 Unauthorized",
+            "403 PERMISSION_DENIED",
+            "API_KEY_INVALID: API key not valid",
+        ],
+    )
+    def test_recognises_a_key_level_failure(self, message):
+        assert gemini._is_auth_error(RuntimeError(message)) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "404 models/gemini-1.5-flash is not found",
+            "500 internal server error",
+            "connection reset by peer",
+            "429 quota exceeded",
         ],
     )
     def test_does_not_mistake_other_failures_for_a_key_problem(self, message):
-        assert gemini._is_quota_or_auth_error(RuntimeError(message)) is False
+        assert gemini._is_auth_error(RuntimeError(message)) is False
 
 
 class TestTimeoutDetection:

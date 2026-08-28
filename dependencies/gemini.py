@@ -19,16 +19,19 @@ running out of free-tier quota mid-demo:
   names on its own schedule; an app for farmers should not go dark because an
   alias was renamed. `gemini-flash-latest` leads the list precisely because it
   is an alias that tracks whatever the current fast model is.
-* A quota or authentication failure is retried against a second API key
-  (`GEMINI_API_KEY_FALLBACK`), if one is configured. AI Studio's free tier is
-  a low daily cap per key; once it is spent, every further call to that key
-  fails until the quota resets, which a same-key model swap cannot fix.
+* An authentication failure (bad key, revoked permission) is retried against a
+  second API key (`GEMINI_API_KEY_FALLBACK`), if one is configured.
 
-These are deliberately two SEPARATE retry axes, not one combined list, because
-they mean different things: "this model name doesn't exist" says nothing about
-the other models on the same key, but "this key is out of quota" says nothing
-about the model name - it will fail identically on every model until either
-the quota resets or a different key is used.
+A quota error is retried against the OTHER MODELS on the SAME key first, and
+only moves to the fallback key once every candidate model has failed on this
+key. This was learned the hard way, not assumed: AI Studio's free tier quota
+(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`) is scoped per model, not
+per key or per project - live production logs showed one model at 23/20
+requests for the day while the other three candidates on the SAME key sat at
+0/20, completely unused. Jumping straight to a second key on the first 429
+would waste three-quarters of a key's daily budget for no reason. An auth
+error carries no such per-model nuance - a bad or revoked key fails identically
+on every model, so it moves to the next key immediately.
 """
 
 from __future__ import annotations
@@ -97,20 +100,35 @@ def _is_missing_model(exc: Exception) -> bool:
 _REQUEST_TIMEOUT_SECONDS = 15
 
 
-def _is_quota_or_auth_error(exc: Exception) -> bool:
-    """True when the failure is about the KEY, not the model: exhausted quota,
-    a bad key, or a permission problem. Worth retrying against a different
-    key. Not worth retrying against a different model on the SAME key - a
-    quota cap and a bad key both fail identically regardless of model name.
+def _is_quota_error(exc: Exception) -> bool:
+    """True when the failure is 'this MODEL's daily allowance on this key is
+    spent', not a fault with the key itself.
+
+    Worth retrying against another model name on the SAME key: Google's free
+    tier tracks this quota per model per project
+    (`GenerateRequestsPerDayPerProjectPerModel-FreeTier`), so a 429 on one
+    model says nothing about whether the other candidate models on this same
+    key still have quota left. Confirmed against a live rate-limit dashboard
+    where the failing model was over its 20/day cap while three other
+    candidates on the same key sat completely untouched.
+    """
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in ("429", "quota", "rate limit", "resource_exhausted")
+    )
+
+
+def _is_auth_error(exc: Exception) -> bool:
+    """True when the failure is about the KEY itself - bad, revoked, or
+    lacking permission. Worth retrying against a different key. Not worth
+    retrying against a different model on the SAME key: a bad key fails
+    identically regardless of model name.
     """
     text = str(exc).lower()
     return any(
         marker in text
         for marker in (
-            "429",
-            "quota",
-            "rate limit",
-            "resource_exhausted",
             "401",
             "403",
             "permission_denied",
@@ -138,10 +156,11 @@ def generate(prompt: str, *, json_mode: bool = False) -> str:
     """Runs `prompt` and returns the text.
 
     Tries each configured key in order; for each key, tries each candidate
-    model in order. A missing-model error moves to the next model on the SAME
-    key. A quota/auth error abandons the remaining models on this key and
-    moves straight to the next key - there is no reason to keep asking an
-    exhausted key for a different model.
+    model in order. A missing-model error or a quota error moves to the next
+    model on the SAME key - quota is tracked per model, so a 429 on one
+    candidate does not mean the others are exhausted too. An auth error (bad
+    or revoked key) or a timeout abandons the remaining models on this key and
+    moves straight to the next key.
 
     Any other kind of failure (a bad prompt, a malformed response, a network
     error) is raised immediately rather than retried across every key and
@@ -185,7 +204,14 @@ def generate(prompt: str, *, json_mode: bool = False) -> str:
                     )
                     continue
 
-                if _is_quota_or_auth_error(exc) or _is_timeout(exc):
+                if _is_quota_error(exc):
+                    logger.warning(
+                        "Gemini model %s out of quota on key %d, trying next model on same key: %s",
+                        name, key_index, exc,
+                    )
+                    continue  # quota is per-model; other candidates may still have budget
+
+                if _is_auth_error(exc) or _is_timeout(exc):
                     logger.warning(
                         "Gemini key %d rejected or timed out (%s), %s",
                         key_index, exc,

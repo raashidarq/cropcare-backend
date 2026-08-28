@@ -79,11 +79,12 @@ ruff check .              # must stay clean — this is what CI runs
 
 ## Gemini usage, cost, and why there's a fallback list
 
-- **Free tier**: Google AI Studio keys get roughly 20 requests/day per model
-  on the free tier. This matters more now that the app auto-fetches AI
-  guidance on every diagnosis — see the architecture diagram in the app repo
-  for how the on-device guideline stays on screen if that call fails or is
-  rate-limited even after both fallbacks below are exhausted.
+- **Free tier**: Google AI Studio keys get roughly 20 requests/day **per
+  model, per project** — confirmed against a live rate-limit dashboard, not
+  assumed. This matters more now that the app auto-fetches AI guidance on
+  every diagnosis — see the architecture diagram in the app repo for how the
+  on-device guideline stays on screen if that call fails or is rate-limited
+  even after every fallback below is exhausted.
 - **`dependencies/gemini.py`** centralises every call and retries along two
   independent axes:
   - **Model name.** `gemini-1.5-flash` was hardcoded until it was retired
@@ -92,14 +93,21 @@ ruff check .              # must stay clean — this is what CI runs
     Render without a code change; a "model not found" failure also falls
     through a candidate list on its own, so a future rename degrades
     gracefully instead of going dark again.
-  - **API key.** A quota-exhausted or invalid key fails identically on every
-    model name, so a model swap can't fix it — only a different key can.
-    `GEMINI_API_KEY_FALLBACK` is tried when the primary is rejected for
-    exactly that reason (429/quota/401/403), not for a missing model.
-  A failure that matches neither signature (a malformed prompt, a genuine
+  - **API key.** Since the daily cap is per model, a 429 on one candidate
+    says nothing about the others on the same key — they're retried before
+    the fallback key is touched at all. Only an auth failure (401/403, a bad
+    or revoked key) or a timeout moves straight to `GEMINI_API_KEY_FALLBACK`,
+    since those genuinely are properties of the key/connection, not of one
+    model name.
+  A failure that matches none of the above (a malformed prompt, a genuine
   network error) is raised immediately rather than retried across every key
-  and model combination, which would only turn one real failure into eight
+  and model combination, which would only turn one real failure into several
   times the latency for the same result.
+- **Every call is bounded by a 15s timeout** (`request_options={"timeout":
+  ...}`). Found via a live check against the deployed service: without a
+  timeout, a stalled connection to Google's API hung `/interpret-diagnosis`
+  and `/chat-about-diagnosis` past three minutes with zero response — worse
+  than a fast, clean failure the on-device fallback can absorb.
 
 ## Reading the codebase
 
