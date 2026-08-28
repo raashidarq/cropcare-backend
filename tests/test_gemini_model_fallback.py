@@ -16,13 +16,19 @@ along the same line:
 * A live check against the deployed service found /interpret-diagnosis and
   /chat-about-diagnosis hanging past three minutes with no response at all -
   generate_content() had no timeout, so a stalled connection to Google's API
-  hung the whole request indefinitely. That is TestTimeout below.
+  hung the whole request indefinitely. That is TestTimeout below. A second
+  live check then found EVERY request timing out on the SAME first model on
+  both keys while a rate-limit dashboard showed three other candidate models
+  completely unused - a timeout that jumped straight to the next key, like
+  auth errors do, never gave those idle models a chance. TestKeyFallback
+  covers that too.
 
-The two retry axes are independent on purpose: a missing-model error or a
-quota error stays on the same key and tries the next model - both say nothing
-about the other candidates on that key. An auth error (bad or revoked key) or
-a timeout abandons the remaining models on that key and moves to the next key
-- both are properties of the key/connection, not of any one model name.
+The two retry axes are independent on purpose: a missing-model error, a
+quota error, or a timeout stays on the same key and tries the next model -
+none of the three say anything about the other candidates on that key. Only
+an auth error (a bad or revoked key) abandons the remaining models on that
+key and moves to the next key, because that really is a property of the key
+itself, not of any one model name.
 """
 
 from __future__ import annotations
@@ -392,21 +398,54 @@ class TestTimeoutDetection:
     def test_does_not_mistake_other_failures_for_a_timeout(self, message):
         assert gemini._is_timeout(RuntimeError(message)) is False
 
-    def test_a_timeout_switches_keys_like_a_quota_error_does(self):
+    def test_a_timeout_tries_the_next_model_on_the_same_key_before_switching(self):
+        # The bug this guards against: gemini-flash-latest (tried first)
+        # times out, and a dashboard shows the OTHER candidate models on the
+        # same key sitting completely unused - so the retry has to reach them
+        # before giving up on the key, not jump to the fallback key on the
+        # very first timeout.
+        configured_keys = []
+
+        def track_configure(api_key):
+            configured_keys.append(api_key)
+
+        calls = []
+
+        def make(model_name, generation_config=None):
+            calls.append((configured_keys[-1], model_name))
+            if model_name == gemini.candidate_models()[0]:
+                raise RuntimeError("504 Deadline Exceeded")
+            return _model("answered by a less-loaded model on the same key")
+
+        with patch("dependencies.gemini.settings",
+                   _settings(primary="primary-key", fallback="fallback-key")), \
+                patch("dependencies.gemini.genai") as g:
+            g.configure.side_effect = track_configure
+            g.GenerativeModel.side_effect = make
+            result = gemini.generate("p")
+
+        assert result == "answered by a less-loaded model on the same key"
+        # Recovered on the SAME key's second candidate - the fallback key was
+        # never even configured against.
+        assert all(c[0] == "primary-key" for c in calls)
+        assert len(calls) == 2
+
+    def test_a_timeout_on_every_model_eventually_falls_through_to_the_next_key(self):
         attempt = {"n": 0}
 
         def make(model_name, generation_config=None):
             attempt["n"] += 1
-            if attempt["n"] == 1:
+            # Every model on the first key times out; the fallback key's
+            # first model recovers.
+            if attempt["n"] <= len(gemini.candidate_models()):
                 raise RuntimeError("504 Deadline Exceeded")
-            return _model("recovered")
+            return _model("recovered on the fallback key")
 
         with patch("dependencies.gemini.settings",
                    _settings(primary="slow-key", fallback="good-key")), \
                 patch("dependencies.gemini.genai") as g:
             g.GenerativeModel.side_effect = make
-            assert gemini.generate("p") == "recovered"
-        # One stalled attempt on the bad key, not one per candidate model on
-        # it - a stalled connection fails the same way regardless of which
-        # model name is asked for.
-        assert attempt["n"] == 2
+            assert gemini.generate("p") == "recovered on the fallback key"
+        # Every candidate model got tried on the slow key before the fallback
+        # key was touched at all.
+        assert attempt["n"] == len(gemini.candidate_models()) + 1

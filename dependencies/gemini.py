@@ -22,16 +22,26 @@ running out of free-tier quota mid-demo:
 * An authentication failure (bad key, revoked permission) is retried against a
   second API key (`GEMINI_API_KEY_FALLBACK`), if one is configured.
 
-A quota error is retried against the OTHER MODELS on the SAME key first, and
-only moves to the fallback key once every candidate model has failed on this
-key. This was learned the hard way, not assumed: AI Studio's free tier quota
-(`GenerateRequestsPerDayPerProjectPerModel-FreeTier`) is scoped per model, not
-per key or per project - live production logs showed one model at 23/20
-requests for the day while the other three candidates on the SAME key sat at
-0/20, completely unused. Jumping straight to a second key on the first 429
-would waste three-quarters of a key's daily budget for no reason. An auth
-error carries no such per-model nuance - a bad or revoked key fails identically
-on every model, so it moves to the next key immediately.
+A quota error OR a timeout is retried against the OTHER MODELS on the SAME
+key first, and only moves to the fallback key once every candidate model has
+failed on this key. This was learned the hard way, not assumed:
+
+* AI Studio's free tier quota (`GenerateRequestsPerDayPerProjectPerModel-
+  FreeTier`) is scoped per model, not per key or per project - live
+  production logs showed one model at 23/20 requests for the day while the
+  other three candidates on the SAME key sat at 0/20, completely unused.
+* A live rate-limit dashboard later showed those same three models still
+  sitting at 0/20 while every request was failing with a timeout, not a
+  quota error - because a timeout used to jump straight to the fallback key
+  without ever trying them. `gemini-flash-latest` resolving to whatever
+  Google's newest, most in-demand model currently is can plausibly mean that
+  ONE model is slow or overloaded, not the whole key.
+
+Jumping straight to a second key on the first failure would waste most of a
+key's daily budget, and possibly working models, for no reason. An auth
+error carries no such per-model nuance - a bad or revoked key fails
+identically on every model, so it's the only failure that moves to the next
+key immediately.
 """
 
 from __future__ import annotations
@@ -141,9 +151,18 @@ def _is_auth_error(exc: Exception) -> bool:
 
 def _is_timeout(exc: Exception) -> bool:
     """True when the call ran out of its wall-clock budget rather than
-    getting a real answer from Google. Worth retrying against a different
-    key: a stalled connection is more often a property of the network path
-    for that key/project than of one particular model name.
+    getting a real answer from Google.
+
+    Worth retrying against another model on the SAME key first, same as a
+    quota error - live testing showed every candidate model timing out on
+    both configured keys while a rate-limit dashboard showed three of those
+    four models sitting completely unused (0 requests that day). If a
+    timeout only ever moved to the next key, a slow or overloaded model
+    (`gemini-flash-latest` resolving to whatever Google currently considers
+    its newest, most in-demand model is a likely candidate) would burn the
+    entire timeout budget on every key without ever reaching a model that
+    might simply respond faster. Only once every model on a key has timed
+    out does the loop fall through to the next key.
     """
     text = str(exc).lower()
     return any(
@@ -156,11 +175,13 @@ def generate(prompt: str, *, json_mode: bool = False) -> str:
     """Runs `prompt` and returns the text.
 
     Tries each configured key in order; for each key, tries each candidate
-    model in order. A missing-model error or a quota error moves to the next
-    model on the SAME key - quota is tracked per model, so a 429 on one
-    candidate does not mean the others are exhausted too. An auth error (bad
-    or revoked key) or a timeout abandons the remaining models on this key and
-    moves straight to the next key.
+    model in order. A missing-model error, a quota error, or a timeout moves
+    to the next model on the SAME key first - quota is tracked per model, and
+    a timeout may just as easily mean one specific model is slow or
+    overloaded as it means the key/connection is bad. Only an auth error (bad
+    or revoked key) - which fails identically regardless of model name -
+    abandons the remaining models on this key and moves straight to the next
+    key.
 
     Any other kind of failure (a bad prompt, a malformed response, a network
     error) is raised immediately rather than retried across every key and
@@ -211,9 +232,16 @@ def generate(prompt: str, *, json_mode: bool = False) -> str:
                     )
                     continue  # quota is per-model; other candidates may still have budget
 
-                if _is_auth_error(exc) or _is_timeout(exc):
+                if _is_timeout(exc):
                     logger.warning(
-                        "Gemini key %d rejected or timed out (%s), %s",
+                        "Gemini model %s timed out on key %d, trying next model on same key: %s",
+                        name, key_index, exc,
+                    )
+                    continue  # could be one slow/overloaded model, not the whole key
+
+                if _is_auth_error(exc):
+                    logger.warning(
+                        "Gemini key %d rejected (%s), %s",
                         key_index, exc,
                         "no fallback key left" if is_last_key else "trying fallback key",
                     )

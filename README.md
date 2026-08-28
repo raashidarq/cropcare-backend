@@ -95,10 +95,14 @@ ruff check .              # must stay clean — this is what CI runs
     gracefully instead of going dark again.
   - **API key.** Since the daily cap is per model, a 429 on one candidate
     says nothing about the others on the same key — they're retried before
-    the fallback key is touched at all. Only an auth failure (401/403, a bad
-    or revoked key) or a timeout moves straight to `GEMINI_API_KEY_FALLBACK`,
-    since those genuinely are properties of the key/connection, not of one
-    model name.
+    the fallback key is touched at all. A timeout gets the same treatment,
+    after a live check found every request timing out on the same first
+    model on both keys while a rate-limit dashboard showed the other three
+    candidates completely unused — a timeout most likely means one specific
+    model is slow or overloaded, not that the whole key is bad. Only an auth
+    failure (401/403, a bad or revoked key) moves straight to
+    `GEMINI_API_KEY_FALLBACK`, since that's the one failure that's genuinely
+    about the key, not any particular model.
   A failure that matches none of the above (a malformed prompt, a genuine
   network error) is raised immediately rather than retried across every key
   and model combination, which would only turn one real failure into several
