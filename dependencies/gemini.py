@@ -56,11 +56,16 @@ logger = logging.getLogger(__name__)
 
 # Ordered. The first is an alias that follows Google's current fast model; the
 # rest are concrete fallbacks in case the alias is unavailable on a given key.
+#
+# gemini-2.5-flash, gemini-2.0-flash, and gemini-2.5-flash-lite were retired
+# by Google and lived here as dead weight until live logs showed all three
+# 404ing with "no longer available ... use models/gemini-3.6-flash" /
+# "... gemini-3.5-flash-lite" - Google's own error message named their
+# replacements directly, not a guess.
 _FALLBACK_MODELS = [
     "gemini-flash-latest",
-    "gemini-2.5-flash",
-    "gemini-2.0-flash",
-    "gemini-2.5-flash-lite",
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
 ]
 
 
