@@ -145,6 +145,10 @@ class TestInterpretDiagnosis:
     @patch("dependencies.gemini.settings")
     def test_gemini_missing_api_key(self, mock_settings):
         mock_settings.gemini_api_key = ""
+        # Patching replaces the whole settings object, so an unset fallback
+        # auto-vivifies as a truthy MagicMock rather than an empty string -
+        # candidate_keys() would otherwise treat it as a real second key.
+        mock_settings.gemini_api_key_fallback = ""
         payload = {
             "crop_id": "tomato",
             "disease_id": "tomato_late_blight",

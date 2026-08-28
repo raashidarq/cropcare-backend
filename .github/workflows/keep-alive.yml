@@ -1,0 +1,34 @@
+name: Keep Render backend warm
+
+# Render's free tier spins the service down after ~15 minutes of no
+# incoming requests; the first request after that waits 20-50s for a cold
+# start. That is a real problem during judging or live testing - a demo
+# whose first tap hangs for half a minute reads as broken, not slow.
+#
+# This pings /health often enough that the service never goes idle long
+# enough to sleep. It costs nothing: GitHub Actions minutes are free on a
+# public repo, and /health does no work server-side.
+#
+# Honest caveat: GitHub's own scheduler is "best effort", not to-the-minute
+# - under load, a run can be delayed by several minutes. Ten-minute spacing
+# leaves comfortable margin under Render's ~15-minute window, but it is not
+# a guarantee. `workflow_dispatch` lets you fire it by hand right before a
+# demo for a sure thing, independent of the schedule.
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /health
+        run: |
+          code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 45 \
+            https://cropcare-backend-xy88.onrender.com/health)
+          echo "responded with HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::warning::Backend did not return 200 (got $code) - it may have been cold-starting during this check, or it may be genuinely down."
+          fi

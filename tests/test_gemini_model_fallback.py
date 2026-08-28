@@ -1,10 +1,20 @@
 """
 Tests for dependencies/gemini.py.
 
-This module exists because of a real production outage: both routers hardcoded
-`gemini-1.5-flash`, that name stopped being served on the v1beta endpoint Google
-AI Studio keys use, and treatment guidance and chat both went dark at once with
-no fix short of a code change and redeploy.
+Two real production incidents motivate this module, and this file is split
+along the same line:
+
+* A hardcoded model name (`gemini-1.5-flash`) was retired by Google, and both
+  routers went dark simultaneously with no fix short of a redeploy. That is
+  TestModelFallback below.
+* Google AI Studio's free tier is a low daily cap PER KEY. Once the primary
+  key is spent, every further call to it fails identically regardless of
+  which model is asked for - a same-key model swap cannot fix that, only a
+  different key can. That is TestKeyFallback below.
+
+The two axes are independent on purpose: a missing-model error stays on the
+same key and tries the next model; a quota/auth error abandons the remaining
+models on that key and moves to the next key.
 """
 
 from __future__ import annotations
@@ -24,45 +34,78 @@ def _model(text="ok"):
     return inst
 
 
+def _settings(primary="k1", fallback=""):
+    """A settings mock with BOTH gemini key fields explicitly set.
+
+    Patching `dependencies.gemini.settings` replaces the whole object with a
+    MagicMock; any attribute not explicitly set here (like
+    gemini_api_key_fallback) auto-vivifies as a truthy MagicMock rather than
+    an empty string, which candidate_keys() would then treat as a second
+    real key. Every test sets both fields for exactly that reason.
+    """
+    s = MagicMock()
+    s.gemini_api_key = primary
+    s.gemini_api_key_fallback = fallback
+    s.gemini_model = ""
+    return s
+
+
 class TestCandidateModels:
     def test_configured_model_is_tried_first(self):
-        with patch("dependencies.gemini.settings") as s:
+        with patch("dependencies.gemini.settings", _settings()) as s:
             s.gemini_model = "gemini-custom"
             assert gemini.candidate_models()[0] == "gemini-custom"
 
     def test_fallbacks_follow_the_configured_one(self):
-        with patch("dependencies.gemini.settings") as s:
+        with patch("dependencies.gemini.settings", _settings()) as s:
             s.gemini_model = "gemini-custom"
             names = gemini.candidate_models()
-        # A single configured name that Google retires would otherwise take the
-        # whole app down again.
         assert len(names) > 1
 
     def test_no_duplicates_when_configured_matches_a_fallback(self):
-        with patch("dependencies.gemini.settings") as s:
+        with patch("dependencies.gemini.settings", _settings()) as s:
             s.gemini_model = "gemini-flash-latest"
             names = gemini.candidate_models()
         assert len(names) == len(set(names))
 
     def test_unset_config_falls_back_to_the_list(self):
-        with patch("dependencies.gemini.settings") as s:
-            s.gemini_model = ""
+        with patch("dependencies.gemini.settings", _settings()):
             names = gemini.candidate_models()
-        # The alias that tracks Google's current fast model leads, precisely so
-        # a rename does not need a deploy.
         assert names[0] == "gemini-flash-latest"
+
+
+class TestCandidateKeys:
+    def test_only_the_primary_when_no_fallback_is_configured(self):
+        with patch("dependencies.gemini.settings", _settings(primary="k1", fallback="")):
+            assert gemini.candidate_keys() == ["k1"]
+
+    def test_both_when_a_fallback_is_configured(self):
+        with patch("dependencies.gemini.settings", _settings(primary="k1", fallback="k2")):
+            assert gemini.candidate_keys() == ["k1", "k2"]
+
+    def test_a_fallback_identical_to_the_primary_is_dropped(self):
+        # Retrying the same exhausted key against itself teaches nothing and
+        # only slows the failure down.
+        with patch("dependencies.gemini.settings", _settings(primary="k1", fallback="k1")):
+            assert gemini.candidate_keys() == ["k1"]
+
+    def test_whitespace_only_fallback_counts_as_unset(self):
+        with patch("dependencies.gemini.settings", _settings(primary="k1", fallback="   ")):
+            assert gemini.candidate_keys() == ["k1"]
+
+    def test_no_keys_at_all_is_an_empty_list(self):
+        with patch("dependencies.gemini.settings", _settings(primary="", fallback="")):
+            assert gemini.candidate_keys() == []
 
 
 class TestGenerate:
     def test_returns_text_from_the_first_working_model(self):
-        with patch("dependencies.gemini.settings") as s, \
+        with patch("dependencies.gemini.settings", _settings()), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = "k"
-            s.gemini_model = ""
             g.GenerativeModel.return_value = _model("hello")
             assert gemini.generate("prompt") == "hello"
 
-    def test_a_missing_model_falls_through_to_the_next(self):
+    def test_a_missing_model_falls_through_to_the_next_model_same_key(self):
         calls = []
 
         def make(model_name, generation_config=None):
@@ -73,48 +116,41 @@ class TestGenerate:
                 )
             return _model("recovered")
 
-        with patch("dependencies.gemini.settings") as s, \
+        with patch("dependencies.gemini.settings", _settings()), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = "k"
-            s.gemini_model = ""
             g.GenerativeModel.side_effect = make
             assert gemini.generate("p") == "recovered"
 
         assert len(calls) == 2
 
-    def test_a_real_failure_is_not_retried_against_every_model(self):
+    def test_an_unrecognised_failure_is_not_retried_at_all(self):
         calls = []
 
         def make(model_name, generation_config=None):
             calls.append(model_name)
-            raise RuntimeError("429 quota exceeded")
+            raise RuntimeError("500 internal server error")
 
-        with patch("dependencies.gemini.settings") as s, \
+        with patch("dependencies.gemini.settings", _settings()), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = "k"
-            s.gemini_model = ""
             g.GenerativeModel.side_effect = make
-            with pytest.raises(RuntimeError, match="quota"):
+            with pytest.raises(RuntimeError, match="500"):
                 gemini.generate("p")
 
-        # A quota error fails identically on every candidate; hammering four
-        # models to discover that wastes the farmer's time.
+        # Not a missing-model or quota/auth signature, so it is treated as a
+        # real failure and surfaced immediately rather than burning through
+        # every remaining model.
         assert len(calls) == 1
 
     def test_the_last_error_surfaces_when_every_model_is_missing(self):
-        with patch("dependencies.gemini.settings") as s, \
+        with patch("dependencies.gemini.settings", _settings()), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = "k"
-            s.gemini_model = ""
             g.GenerativeModel.side_effect = RuntimeError("404 not found")
             with pytest.raises(RuntimeError, match="404"):
                 gemini.generate("p")
 
     def test_json_mode_asks_for_json(self):
-        with patch("dependencies.gemini.settings") as s, \
+        with patch("dependencies.gemini.settings", _settings()), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = "k"
-            s.gemini_model = ""
             g.GenerativeModel.return_value = _model("{}")
             gemini.generate("p", json_mode=True)
             _, kwargs = g.GenerativeModel.call_args
@@ -123,22 +159,121 @@ class TestGenerate:
             }
 
     def test_plain_mode_sends_no_generation_config(self):
-        with patch("dependencies.gemini.settings") as s, \
+        with patch("dependencies.gemini.settings", _settings()), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = "k"
-            s.gemini_model = ""
             g.GenerativeModel.return_value = _model("text")
             gemini.generate("p")
             _, kwargs = g.GenerativeModel.call_args
             assert kwargs["generation_config"] is None
 
-    def test_a_missing_api_key_fails_before_any_call(self):
-        with patch("dependencies.gemini.settings") as s, \
+    def test_no_keys_configured_fails_before_any_call(self):
+        with patch("dependencies.gemini.settings", _settings(primary="", fallback="")), \
                 patch("dependencies.gemini.genai") as g:
-            s.gemini_api_key = ""
-            with pytest.raises(RuntimeError, match="API key"):
+            with pytest.raises(RuntimeError, match="not configured"):
                 gemini.generate("p")
             g.GenerativeModel.assert_not_called()
+
+
+class TestKeyFallback:
+    """The behaviour this whole change exists for: the primary key's free
+    tier runs out mid-demo, and the app keeps answering instead of going
+    dark."""
+
+    def test_a_quota_error_switches_to_the_fallback_key(self):
+        configured_keys = []
+
+        def track_configure(api_key):
+            configured_keys.append(api_key)
+
+        calls = []
+
+        def make(model_name, generation_config=None):
+            calls.append((configured_keys[-1], model_name))
+            if configured_keys[-1] == "primary-key":
+                raise RuntimeError("429 Resource has been exhausted (quota)")
+            return _model("answered on the fallback key")
+
+        with patch("dependencies.gemini.settings",
+                   _settings(primary="primary-key", fallback="fallback-key")), \
+                patch("dependencies.gemini.genai") as g:
+            g.configure.side_effect = track_configure
+            g.GenerativeModel.side_effect = make
+            result = gemini.generate("p")
+
+        assert result == "answered on the fallback key"
+        # Exactly one attempt on the exhausted key, not one per candidate
+        # model - a quota cap fails identically regardless of model name, so
+        # cycling models on it first would only waste the farmer's time.
+        primary_attempts = [c for c in calls if c[0] == "primary-key"]
+        assert len(primary_attempts) == 1
+
+    def test_an_auth_error_also_switches_keys(self):
+        attempt = {"n": 0}
+
+        def make(model_name, generation_config=None):
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                raise RuntimeError("401 API_KEY_INVALID: API key not valid")
+            return _model("ok")
+
+        with patch("dependencies.gemini.settings",
+                   _settings(primary="bad-key", fallback="good-key")), \
+                patch("dependencies.gemini.genai") as g:
+            g.GenerativeModel.side_effect = make
+            assert gemini.generate("p") == "ok"
+
+    def test_missing_model_does_not_burn_through_keys(self):
+        # A model that does not exist, does not exist on either key - this
+        # should exhaust the model list on key one before ever touching key
+        # two, not alternate between them.
+        configured_keys = []
+
+        def track_configure(api_key):
+            configured_keys.append(api_key)
+
+        calls = []
+
+        def make(model_name, generation_config=None):
+            calls.append(configured_keys[-1])
+            raise RuntimeError("404 not found")
+
+        with patch("dependencies.gemini.settings",
+                   _settings(primary="k1", fallback="k2")), \
+                patch("dependencies.gemini.genai") as g:
+            g.configure.side_effect = track_configure
+            g.GenerativeModel.side_effect = make
+            with pytest.raises(RuntimeError, match="404"):
+                gemini.generate("p")
+
+        # All of key one's models exhausted (4 candidates), then all of key
+        # two's.
+        assert calls.count("k1") == len(gemini.candidate_models())
+        assert calls.count("k2") == len(gemini.candidate_models())
+
+    def test_both_keys_exhausted_surfaces_the_last_error(self):
+        with patch("dependencies.gemini.settings",
+                   _settings(primary="k1", fallback="k2")), \
+                patch("dependencies.gemini.genai") as g:
+            g.GenerativeModel.side_effect = RuntimeError("429 quota exceeded")
+            with pytest.raises(RuntimeError, match="429"):
+                gemini.generate("p")
+
+    def test_with_no_fallback_configured_a_quota_error_fails_fast(self):
+        calls = []
+
+        def make(model_name, generation_config=None):
+            calls.append(model_name)
+            raise RuntimeError("429 quota exceeded")
+
+        with patch("dependencies.gemini.settings", _settings(primary="k1", fallback="")), \
+                patch("dependencies.gemini.genai") as g:
+            g.GenerativeModel.side_effect = make
+            with pytest.raises(RuntimeError, match="429"):
+                gemini.generate("p")
+
+        # No second key to fall back to, so this degrades to exactly the old
+        # single-key behaviour: one attempt, immediate failure.
+        assert len(calls) == 1
 
 
 class TestMissingModelDetection:
@@ -159,3 +294,30 @@ class TestMissingModelDetection:
     )
     def test_does_not_mistake_other_failures_for_a_retired_model(self, message):
         assert gemini._is_missing_model(RuntimeError(message)) is False
+
+
+class TestQuotaOrAuthDetection:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "429 Resource has been exhausted (quota)",
+            "RESOURCE_EXHAUSTED",
+            "rate limit exceeded, try again later",
+            "401 Unauthorized",
+            "403 PERMISSION_DENIED",
+            "API_KEY_INVALID: API key not valid",
+        ],
+    )
+    def test_recognises_a_key_level_failure(self, message):
+        assert gemini._is_quota_or_auth_error(RuntimeError(message)) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "404 models/gemini-1.5-flash is not found",
+            "500 internal server error",
+            "connection reset by peer",
+        ],
+    )
+    def test_does_not_mistake_other_failures_for_a_key_problem(self, message):
+        assert gemini._is_quota_or_auth_error(RuntimeError(message)) is False

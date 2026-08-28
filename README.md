@@ -30,6 +30,7 @@ pip install -r requirements.txt
 | `SUPABASE_JWT_SECRET` | yes | verifies tokens issued by Supabase Auth |
 | `GEMINI_API_KEY` | yes | a Google AI Studio key |
 | `GEMINI_MODEL` | no | overrides the model name without a redeploy — see `dependencies/gemini.py` |
+| `GEMINI_API_KEY_FALLBACK` | no | a second key (e.g. from a separate Google account) tried when the primary is out of free-tier quota |
 | `PHONE_AUTH_ENABLED` | no | default `false`. Every SMS provider bills per message; left off deliberately as a cost control |
 
 No `.env.example` is committed — set these in your shell or in Render's
@@ -82,17 +83,23 @@ ruff check .              # must stay clean — this is what CI runs
   on the free tier. This matters more now that the app auto-fetches AI
   guidance on every diagnosis — see the architecture diagram in the app repo
   for how the on-device guideline stays on screen if that call fails or is
-  rate-limited.
-- **`dependencies/gemini.py`** centralises every call and retries against a
-  candidate model list rather than one hardcoded name. This exists because
-  production broke once already: `gemini-1.5-flash` was hardcoded and Google
-  retired it from the v1beta endpoint AI Studio keys use, taking both
-  treatment guidance and chat down simultaneously. `GEMINI_MODEL` lets the
-  model be swapped on Render without a code change; the fallback list means a
-  future rename degrades gracefully instead of going dark again.
-- Only a "model not found" failure triggers a fallback attempt — a quota or
-  auth error fails fast rather than retrying four times against the same
-  wall.
+  rate-limited even after both fallbacks below are exhausted.
+- **`dependencies/gemini.py`** centralises every call and retries along two
+  independent axes:
+  - **Model name.** `gemini-1.5-flash` was hardcoded until it was retired
+    from the v1beta endpoint AI Studio keys use, taking treatment guidance
+    and chat down simultaneously. `GEMINI_MODEL` lets the model be swapped on
+    Render without a code change; a "model not found" failure also falls
+    through a candidate list on its own, so a future rename degrades
+    gracefully instead of going dark again.
+  - **API key.** A quota-exhausted or invalid key fails identically on every
+    model name, so a model swap can't fix it — only a different key can.
+    `GEMINI_API_KEY_FALLBACK` is tried when the primary is rejected for
+    exactly that reason (429/quota/401/403), not for a missing model.
+  A failure that matches neither signature (a malformed prompt, a genuine
+  network error) is raised immediately rather than retried across every key
+  and model combination, which would only turn one real failure into eight
+  times the latency for the same result.
 
 ## Reading the codebase
 

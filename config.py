@@ -22,6 +22,14 @@ class _Settings:
         )
         self.supabase_jwt_secret: str = os.environ.get("SUPABASE_JWT_SECRET", "")
         self.gemini_api_key: str = os.environ.get("GEMINI_API_KEY", "")
+        # Optional second key, e.g. from a separate Google account's AI
+        # Studio project. Google AI Studio's free tier is a low daily request
+        # cap; once the primary key is exhausted, every further call to it
+        # fails until the quota resets. Config, not code, because it can be
+        # rotated or removed on Render without a deploy.
+        self.gemini_api_key_fallback: str = os.environ.get(
+            "GEMINI_API_KEY_FALLBACK", ""
+        )
         # Configurable so a retired model name can be changed on the host
         # without a code change. Empty falls back to the candidate list in
         # dependencies/gemini.py. See that module for why this exists.
