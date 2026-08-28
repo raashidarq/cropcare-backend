@@ -28,9 +28,13 @@ pip install -r requirements.txt
 | `SUPABASE_URL` | yes | |
 | `SUPABASE_SERVICE_ROLE_KEY` | yes | server-side key, never the anon key |
 | `SUPABASE_JWT_SECRET` | yes | verifies tokens issued by Supabase Auth |
-| `GEMINI_API_KEY` | yes | a Google AI Studio key |
+| `AI_PROVIDER` | no | default `gemini` — which provider handles treatment guidance and chat, see `dependencies/ai/service.py` |
+| `AI_FALLBACK_PROVIDER` | no | default `nvidia` — tried if the primary can't serve a request (misconfigured, out of quota, unreachable). Inert until that provider's own key is set, same as `GEMINI_API_KEY_FALLBACK` always worked |
+| `GEMINI_API_KEY` | yes if `gemini` is in use | a Google AI Studio key |
 | `GEMINI_MODEL` | no | overrides the model name without a redeploy — see `dependencies/gemini.py` |
-| `GEMINI_API_KEY_FALLBACK` | no | a second key (e.g. from a separate Google account) tried when the primary is out of free-tier quota |
+| `GEMINI_API_KEY_FALLBACK` | no | a second Gemini key (e.g. from a separate Google account) tried when the primary is out of free-tier quota — this is a fallback WITHIN the Gemini provider, independent of `AI_FALLBACK_PROVIDER` |
+| `NVIDIA_API_KEY` | yes if `nvidia` is in use | from [build.nvidia.com](https://build.nvidia.com) — free tier, no credit card |
+| `NVIDIA_MODEL` | no | default `meta/llama-3.1-8b-instruct` — see `dependencies/ai/nvidia_provider.py` |
 | `PHONE_AUTH_ENABLED` | no | default `false`. Every SMS provider bills per message; left off deliberately as a cost control |
 
 No `.env.example` is committed — set these in your shell or in Render's
@@ -53,8 +57,19 @@ uvicorn main:app --reload
 ## Testing
 
 ```bash
-python -m pytest -q      # 125 passing at time of writing
+python -m pytest -q      # 198 passing, 2 skipped at time of writing
 ruff check .              # must stay clean — this is what CI runs
+```
+
+`pytest` never makes a real call to Gemini or NVIDIA — every provider test
+mocks the SDK/HTTP layer directly, and `tests/conftest.py` force-clears
+`NVIDIA_API_KEY` on every test regardless of what happens to be set in your
+own shell, so an unmocked test can't accidentally reach the network even by
+mistake. The 2 skipped tests are real, opt-in calls to whichever provider is
+configured in your environment:
+
+```bash
+RUN_AI_INTEGRATION_TESTS=true pytest tests/integration/test_ai_providers_live.py -v
 ```
 
 ## API surface
@@ -72,21 +87,64 @@ ruff check .              # must stay clean — this is what CI runs
 | `DELETE` | `/scans/{id}` | removes the row and its stored image |
 | `POST` | `/scans/{id}/upload-url` | signed Supabase Storage upload URL |
 | `GET` | `/reference-data` | crops, diseases, treatment guidelines, model versions |
-| `POST` | `/interpret-diagnosis` | Gemini-written treatment steps |
+| `POST` | `/interpret-diagnosis` | AI-written treatment steps |
 | `POST` | `/chat-about-diagnosis` | scoped follow-up chat about one diagnosis |
 | `POST` | `/feedback` | |
 | `GET` | `/health` | |
 
-## Gemini usage, cost, and why there's a fallback list
+## AI provider abstraction, and why there's a fallback
 
-- **Free tier**: Google AI Studio keys get roughly 20 requests/day **per
-  model, per project** — confirmed against a live rate-limit dashboard, not
-  assumed. This matters more now that the app auto-fetches AI guidance on
-  every diagnosis — see the architecture diagram in the app repo for how the
-  on-device guideline stays on screen if that call fails or is rate-limited
-  even after every fallback below is exhausted.
-- **`dependencies/gemini.py`** centralises every call and retries along two
-  independent axes:
+Nothing in `routers/diagnosis.py` or `routers/chat.py` imports Gemini or
+NVIDIA directly — both call `dependencies/ai/service.py`, which routes to
+whichever provider `AI_PROVIDER` names and falls back to
+`AI_FALLBACK_PROVIDER` if the primary can't serve the request:
+
+```
+Treatment / Chat router
+          |
+  dependencies.ai.service.generate()
+          |
+    AIProvider (interface)
+          |
+   +------+------+
+   |             |
+GeminiProvider  NvidiaProvider
+```
+
+This exists because a single provider's free-tier quota turned out to be a
+real, live blocker: automated testing and normal development traffic drain
+the same daily allowance a farmer's actual usage draws from, and once it's
+gone, waiting for a midnight reset is the only recovery — not viable mid-demo.
+A second, independent provider with its own quota is a much sturdier answer
+than trying to make one provider's limit stretch further.
+
+- **NVIDIA provider — model choice.** `meta/llama-3.1-8b-instruct` by
+  default: a general instruction-following model, not a "thinking"/reasoning
+  variant (unnecessary latency and token cost for a few short sentences of
+  guidance) and not a vision/multimodal one (the ML model already did the
+  image diagnosis — this layer only ever sees text). NVIDIA's own Nemotron
+  family was also considered; Llama 3.1 8B was picked for broader, better-
+  documented general instruction-following at a comparable size. Configurable
+  via `NVIDIA_MODEL` without a code change, same pattern as `GEMINI_MODEL`.
+  **Known limitation, stated plainly:** neither this model nor most other
+  free/fast NVIDIA NIM options have officially documented Sinhala or Tamil
+  support the way Gemini does — expect noticeably better fluency in those
+  languages from Gemini than from the NVIDIA fallback. This is an accepted
+  trade-off for quota resilience at zero cost, not an oversight; the
+  on-device seeded guidance is the real safety net for language quality
+  regardless of which AI provider answers.
+- **Error classification (`dependencies/ai/errors.py`)** decides what's worth
+  a fallback: `AIQuotaExceeded` and `AIProviderUnavailable` (timeouts, 5xx,
+  auth rejection, misconfiguration) trigger the fallback provider.
+  `AIRequestFailed` — a malformed prompt or a response neither provider could
+  have handled — is raised immediately instead, since a different provider
+  would fail on the exact same bad input, and silently retrying it would turn
+  a real, fixable bug into a confusing one two layers further downstream. If
+  the fallback ALSO fails, the error message embeds both providers' original
+  failure reasons, not just whichever was asked last.
+- **`dependencies/gemini.py`** (wrapped by `GeminiProvider`) still handles
+  everything specific to Gemini and centralises every call, retrying along
+  two independent axes of its own:
   - **Model name.** `gemini-1.5-flash` was hardcoded until it was retired
     from the v1beta endpoint AI Studio keys use, taking treatment guidance
     and chat down simultaneously. `GEMINI_MODEL` lets the model be swapped on

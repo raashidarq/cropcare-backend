@@ -1,9 +1,13 @@
 """
 Diagnosis interpretation router: POST /interpret-diagnosis
 
-Handles AI-powered agricultural treatment guidance using Google Gemini,
-with structured JSON generation, multi-language localization, optional
-user scoping, rate limiting, and Supabase audit logging.
+Handles AI-powered agricultural treatment guidance, with structured JSON
+generation, multi-language localization, optional user scoping, rate
+limiting, and Supabase audit logging.
+
+Calls dependencies.ai.service, not a specific provider - which of Gemini or
+NVIDIA actually answers is a config choice (AI_PROVIDER/AI_FALLBACK_PROVIDER
+in config.py), not something this router needs to know.
 """
 
 from __future__ import annotations
@@ -19,7 +23,8 @@ from slowapi.util import get_remote_address
 from supabase import Client, create_client
 
 from config import settings
-from dependencies import gemini
+from dependencies.ai import service as ai_service
+from dependencies.ai.errors import AIConfigurationError
 from dependencies.jwt_auth import get_optional_user_id
 from routers.auth import limiter
 
@@ -200,7 +205,7 @@ async def interpret_diagnosis(
     user_id: str | None = Depends(get_optional_user_id),
 ) -> DiagnosisInterpretationResponse:
     """
-    Generate treatment guidance for a diagnosed crop disease using Gemini.
+    Generate treatment guidance for a diagnosed crop disease using AI.
 
     - Supports multi-language translation (English, Sinhala, Tamil).
     - Rate limited to 20 requests / minute per user or IP.
@@ -209,21 +214,20 @@ async def interpret_diagnosis(
     # Rate limit key: user_id if authenticated, else client IP
     request.state.rate_limit_key = user_id or get_remote_address(request)
 
-    if not settings.gemini_api_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Gemini API key is not configured on the server.",
-        )
-
     prompt = _build_prompt(body)
 
     try:
-        raw_text = gemini.generate(prompt, json_mode=True) or "{}"
+        raw_text = ai_service.generate(prompt, json_mode=True) or "{}"
         parsed = json.loads(raw_text)
     except json.JSONDecodeError:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Received malformed JSON from Gemini model.",
+            detail="Received malformed JSON from the AI model.",
+        )
+    except AIConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI guidance is not configured on the server: {exc!s}",
         )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(

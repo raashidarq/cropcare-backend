@@ -34,7 +34,8 @@ from slowapi.util import get_remote_address
 from supabase import Client, create_client
 
 from config import settings
-from dependencies import gemini
+from dependencies.ai import service as ai_service
+from dependencies.ai.errors import AIConfigurationError
 from dependencies.jwt_auth import get_optional_user_id
 from routers.auth import limiter
 
@@ -185,16 +186,15 @@ async def chat_about_diagnosis(
     """
     request.state.rate_limit_key = user_id or get_remote_address(request)
 
-    if not settings.gemini_api_key:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Gemini API key is not configured on the server.",
-        )
-
     prompt = _build_prompt(body)
 
     try:
-        answer = (gemini.generate(prompt) or "").strip()
+        answer = (ai_service.generate(prompt) or "").strip()
+    except AIConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"AI chat is not configured on the server: {exc!s}",
+        )
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
