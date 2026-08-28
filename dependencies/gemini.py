@@ -85,6 +85,18 @@ def _is_missing_model(exc: Exception) -> bool:
     return "not found" in text or "404" in text or "is not supported" in text
 
 
+# Wall-clock budget for a single generate_content() call.
+#
+# This existed as NO timeout at all until a live check on the deployed
+# service found /interpret-diagnosis and /chat-about-diagnosis both hanging
+# past three minutes with zero response - not slow, stuck. The
+# google-generativeai SDK does not bound a call by default; a stalled
+# connection to Google's API, or a slow network path from the host, hangs
+# the whole request indefinitely. Farmers give up long before three minutes;
+# so does a demo audience.
+_REQUEST_TIMEOUT_SECONDS = 20
+
+
 def _is_quota_or_auth_error(exc: Exception) -> bool:
     """True when the failure is about the KEY, not the model: exhausted quota,
     a bad key, or a permission problem. Worth retrying against a different
@@ -106,6 +118,19 @@ def _is_quota_or_auth_error(exc: Exception) -> bool:
             "invalid api key",
             "api key not valid",
         )
+    )
+
+
+def _is_timeout(exc: Exception) -> bool:
+    """True when the call ran out of its wall-clock budget rather than
+    getting a real answer from Google. Worth retrying against a different
+    key: a stalled connection is more often a property of the network path
+    for that key/project than of one particular model name.
+    """
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in ("deadline", "timeout", "timed out", "504", "unavailable")
     )
 
 
@@ -145,7 +170,10 @@ def generate(prompt: str, *, json_mode: bool = False) -> str:
                     model_name=name,
                     generation_config=generation_config,
                 )
-                response = model.generate_content(prompt)
+                response = model.generate_content(
+                    prompt,
+                    request_options={"timeout": _REQUEST_TIMEOUT_SECONDS},
+                )
                 return response.text or ""
             except Exception as exc:
                 last_error = exc
@@ -157,9 +185,9 @@ def generate(prompt: str, *, json_mode: bool = False) -> str:
                     )
                     continue
 
-                if _is_quota_or_auth_error(exc):
+                if _is_quota_or_auth_error(exc) or _is_timeout(exc):
                     logger.warning(
-                        "Gemini key %d rejected (%s), %s",
+                        "Gemini key %d rejected or timed out (%s), %s",
                         key_index, exc,
                         "no fallback key left" if is_last_key else "trying fallback key",
                     )

@@ -1,7 +1,7 @@
 """
 Tests for dependencies/gemini.py.
 
-Two real production incidents motivate this module, and this file is split
+Three real production incidents motivate this module, and this file is split
 along the same line:
 
 * A hardcoded model name (`gemini-1.5-flash`) was retired by Google, and both
@@ -11,10 +11,14 @@ along the same line:
   key is spent, every further call to it fails identically regardless of
   which model is asked for - a same-key model swap cannot fix that, only a
   different key can. That is TestKeyFallback below.
+* A live check against the deployed service found /interpret-diagnosis and
+  /chat-about-diagnosis hanging past three minutes with no response at all -
+  generate_content() had no timeout, so a stalled connection to Google's API
+  hung the whole request indefinitely. That is TestTimeout below.
 
-The two axes are independent on purpose: a missing-model error stays on the
-same key and tries the next model; a quota/auth error abandons the remaining
-models on that key and moves to the next key.
+The two retry axes are independent on purpose: a missing-model error stays on
+the same key and tries the next model; a quota/auth/timeout error abandons
+the remaining models on that key and moves to the next key.
 """
 
 from __future__ import annotations
@@ -173,6 +177,21 @@ class TestGenerate:
                 gemini.generate("p")
             g.GenerativeModel.assert_not_called()
 
+    def test_every_call_is_bounded_by_a_timeout(self):
+        # The bug this guards: generate_content() had no timeout at all, so a
+        # stalled connection to Google's API hung the whole request
+        # indefinitely - confirmed live, past three minutes with no response.
+        with patch("dependencies.gemini.settings", _settings()), \
+                patch("dependencies.gemini.genai") as g:
+            instance = _model("hello")
+            g.GenerativeModel.return_value = instance
+            gemini.generate("p")
+            _, kwargs = instance.generate_content.call_args
+            assert "request_options" in kwargs
+            assert kwargs["request_options"]["timeout"] == gemini._REQUEST_TIMEOUT_SECONDS
+            # Farmers give up long before this; so does a demo audience.
+            assert 0 < gemini._REQUEST_TIMEOUT_SECONDS <= 30
+
 
 class TestKeyFallback:
     """The behaviour this whole change exists for: the primary key's free
@@ -321,3 +340,43 @@ class TestQuotaOrAuthDetection:
     )
     def test_does_not_mistake_other_failures_for_a_key_problem(self, message):
         assert gemini._is_quota_or_auth_error(RuntimeError(message)) is False
+
+
+class TestTimeoutDetection:
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "504 Deadline Exceeded",
+            "DeadlineExceeded: 20.0s timeout",
+            "Request timed out",
+            "503 The service is currently unavailable",
+        ],
+    )
+    def test_recognises_a_stalled_call(self, message):
+        assert gemini._is_timeout(RuntimeError(message)) is True
+
+    @pytest.mark.parametrize(
+        "message",
+        ["429 quota exceeded", "404 not found", "401 invalid api key"],
+    )
+    def test_does_not_mistake_other_failures_for_a_timeout(self, message):
+        assert gemini._is_timeout(RuntimeError(message)) is False
+
+    def test_a_timeout_switches_keys_like_a_quota_error_does(self):
+        attempt = {"n": 0}
+
+        def make(model_name, generation_config=None):
+            attempt["n"] += 1
+            if attempt["n"] == 1:
+                raise RuntimeError("504 Deadline Exceeded")
+            return _model("recovered")
+
+        with patch("dependencies.gemini.settings",
+                   _settings(primary="slow-key", fallback="good-key")), \
+                patch("dependencies.gemini.genai") as g:
+            g.GenerativeModel.side_effect = make
+            assert gemini.generate("p") == "recovered"
+        # One stalled attempt on the bad key, not one per candidate model on
+        # it - a stalled connection fails the same way regardless of which
+        # model name is asked for.
+        assert attempt["n"] == 2
