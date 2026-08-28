@@ -72,6 +72,16 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 # ---------------------------------------------------------------------------
 
 def _get_supabase() -> Client:
+    # Every other router guards this (sync.py, chat.py, feedback.py); this one
+    # didn't, so a missing SUPABASE_SERVICE_ROLE_KEY surfaced as the raw
+    # supabase-py error "supabase_key is required" instead of a clear message
+    # - that's what a live registration failure actually looked like in
+    # production logs before this guard existed.
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Supabase credentials are not configured.",
+        )
     return create_client(settings.supabase_url, settings.supabase_service_role_key)
 
 
@@ -273,9 +283,9 @@ async def register(request: Request, body: EmailPasswordBody) -> SessionResponse
     should not lock each other out.
     """
     request.state.rate_limit_key = body.email
+    supabase = _get_supabase()
 
     try:
-        supabase = _get_supabase()
         response = supabase.auth.sign_up(
             {"email": body.email, "password": body.password}
         )
@@ -313,9 +323,9 @@ async def login(request: Request, body: EmailPasswordBody) -> SessionResponse:
     "wrong password" tells an attacker which emails are registered.
     """
     request.state.rate_limit_key = body.email
+    supabase = _get_supabase()
 
     try:
-        supabase = _get_supabase()
         response = supabase.auth.sign_in_with_password(
             {"email": body.email, "password": body.password}
         )
@@ -359,9 +369,9 @@ async def request_otp(request: Request, body: OtpRequestBody) -> dict:
 
     # Attach key for rate-limit key function (runs after body begins)
     request.state.rate_limit_key = id_value
+    supabase = _get_supabase()
 
     try:
-        supabase = _get_supabase()
         if id_type == "email":
             supabase.auth.sign_in_with_otp({"email": id_value})
         else:
@@ -392,8 +402,9 @@ async def verify_otp(body: OtpVerifyBody) -> dict:
     if id_type == "phone":
         _check_phone_flag()
 
+    supabase = _get_supabase()
+
     try:
-        supabase = _get_supabase()
         if id_type == "email":
             response = supabase.auth.verify_otp(
                 {"email": id_value, "token": body.code, "type": "email"}
@@ -456,9 +467,9 @@ async def forgot_password(
     - 422 Unprocessable Entity returned on invalid email format via Pydantic.
     """
     request.state.rate_limit_key = str(body.email)
+    supabase = _get_supabase()
 
     try:
-        supabase = _get_supabase()
         supabase.auth.reset_password_for_email(str(body.email))
     except Exception:  # noqa: BLE001, S110
         # Prevent user enumeration attacks by suppressing errors
@@ -594,9 +605,9 @@ async def change_phone_request_otp(
     """
     _check_phone_flag()
     request.state.rate_limit_key = body.new_phone_number
+    supabase = _get_supabase()
 
     try:
-        supabase = _get_supabase()
         supabase.auth.sign_in_with_otp({"phone": body.new_phone_number})
     except Exception:  # noqa: BLE001, S110
         pass

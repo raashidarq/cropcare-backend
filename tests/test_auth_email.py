@@ -104,6 +104,47 @@ class TestRegister:
         sb.assert_not_called()
 
 
+class TestMissingSupabaseConfig:
+    """A live production incident: SUPABASE_SERVICE_ROLE_KEY was unset on the
+    host, and _get_supabase() had no guard before create_client() - the raw
+    supabase-py error ("supabase_key is required") reached the endpoint's
+    broad `except Exception`, which had no way to tell "Supabase isn't
+    configured" apart from "this login attempt failed", so it got reported
+    as a generic 400/401 with no indication the server was misconfigured.
+
+    These tests exercise the real _get_supabase() (not mocked away, unlike
+    the rest of this file) so the guard inside it is actually under test."""
+
+    def test_register_reports_missing_credentials_as_a_clear_500(self):
+        with patch("routers.auth.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = ""
+            r = client.post("/auth/register", json=_creds())
+
+        assert r.status_code == 500
+        assert "not configured" in r.json()["detail"].lower()
+
+    def test_login_reports_missing_credentials_as_a_clear_500(self):
+        with patch("routers.auth.settings") as mock_settings:
+            mock_settings.supabase_url = "https://fake.supabase.co"
+            mock_settings.supabase_service_role_key = ""
+            r = client.post("/auth/login", json=_creds())
+
+        assert r.status_code == 500
+        assert "not configured" in r.json()["detail"].lower()
+
+    def test_missing_credentials_are_never_reported_as_bad_login(self):
+        # The bug this guards against specifically: a config problem must
+        # never look like "wrong password" to the farmer, or they will keep
+        # retrying a password that was never the issue.
+        with patch("routers.auth.settings") as mock_settings:
+            mock_settings.supabase_url = ""
+            mock_settings.supabase_service_role_key = ""
+            r = client.post("/auth/login", json=_creds())
+
+        assert r.status_code != 401
+
+
 class TestLogin:
     def test_signs_in_and_returns_a_session(self):
         with patch("routers.auth._get_supabase",
