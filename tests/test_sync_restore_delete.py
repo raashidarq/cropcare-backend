@@ -22,7 +22,12 @@ client = TestClient(app, raise_server_exceptions=False)
 
 def _jwt(secret: str = "testsecret", sub: str = "user-1") -> str:
     return jwt.encode(
-        {"sub": sub, "exp": int(time.time()) + 3600, "iat": int(time.time())},
+        {
+            "sub": sub,
+            "aud": "authenticated",  # every real Supabase token carries this
+            "exp": int(time.time()) + 3600,
+            "iat": int(time.time()),
+        },
         secret,
         algorithm="HS256",
     )

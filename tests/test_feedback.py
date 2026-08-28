@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 def _make_valid_jwt(secret: str = "testsecret", user_id: str = "user-uuid-1234") -> str:
     payload = {
         "sub": user_id,
+        "aud": "authenticated",  # every real Supabase token carries this
         "exp": int(time.time()) + 3600,
         "iat": int(time.time()),
     }

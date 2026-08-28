@@ -59,6 +59,18 @@ def _get_jwks_client() -> PyJWKClient:
     return _jwks_client
 
 
+# Every Supabase Auth token for a signed-in user carries this exact
+# audience claim - confirmed by decoding a live token's payload, not
+# assumed. PyJWT enforces the 'aud' claim once a token carries one UNLESS
+# told what to expect, so leaving `audience` unset here doesn't skip this
+# check - it fails it, on every token, unconditionally. That was the
+# SECOND bug hiding behind the first: fixing only the ES256 signing
+# algorithm got signature verification to actually pass for the first
+# time, which is what made this one visible at all - the old HS256-only
+# code never got far enough to reach it.
+_EXPECTED_AUDIENCE = "authenticated"
+
+
 def _decode(token: str) -> dict:
     try:
         signing_key = _get_jwks_client().get_signing_key_from_jwt(token)
@@ -72,6 +84,7 @@ def _decode(token: str) -> dict:
             token,
             signing_key.key,
             algorithms=[_JWKS_ALGORITHM],
+            audience=_EXPECTED_AUDIENCE,
             options={"require": ["exp", "sub"]},
         )
 
@@ -79,6 +92,7 @@ def _decode(token: str) -> dict:
         token,
         settings.supabase_jwt_secret,
         algorithms=[_LEGACY_ALGORITHM],
+        audience=_EXPECTED_AUDIENCE,
         options={"require": ["exp", "sub"]},
     )
 

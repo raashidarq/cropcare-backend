@@ -31,6 +31,7 @@ client = TestClient(app, raise_server_exceptions=False)
 def _make_valid_jwt(secret: str = "testsecret", sub: str = "user-uuid-1234") -> str:
     payload = {
         "sub": sub,
+        "aud": "authenticated",  # every real Supabase token carries this
         "exp": int(time.time()) + 3600,
         "iat": int(time.time()),
     }

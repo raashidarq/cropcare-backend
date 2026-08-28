@@ -31,6 +31,7 @@ def _make_valid_jwt(secret: str = "testsecret", sub: str = "user-uuid-1234") -> 
     """Return a syntactically valid HS256 JWT with a future expiry."""
     payload = {
         "sub": sub,
+        "aud": "authenticated",  # every real Supabase token carries this
         "exp": int(time.time()) + 3600,
         "iat": int(time.time()),
     }
@@ -40,6 +41,7 @@ def _make_valid_jwt(secret: str = "testsecret", sub: str = "user-uuid-1234") -> 
 def _make_expired_jwt(secret: str = "testsecret") -> str:
     payload = {
         "sub": "user-uuid-1234",
+        "aud": "authenticated",
         "exp": int(time.time()) - 10,
         "iat": int(time.time()) - 3610,
     }
@@ -409,7 +411,11 @@ class TestJWTSigningKeysES256:
     def test_a_valid_es256_token_succeeds_via_the_jwks_path(self):
         private_key, public_key = self._es256_keypair()
         token = jwt.encode(
-            {"sub": "farmer-1", "exp": int(time.time()) + 3600},
+            {
+                "sub": "farmer-1",
+                "aud": "authenticated",  # every real Supabase token carries this
+                "exp": int(time.time()) + 3600,
+            },
             private_key,
             algorithm="ES256",
         )
@@ -426,7 +432,7 @@ class TestJWTSigningKeysES256:
     def test_an_expired_es256_token_is_rejected(self):
         private_key, public_key = self._es256_keypair()
         token = jwt.encode(
-            {"sub": "farmer-1", "exp": int(time.time()) - 10},
+            {"sub": "farmer-1", "aud": "authenticated", "exp": int(time.time()) - 10},
             private_key,
             algorithm="ES256",
         )
@@ -446,7 +452,7 @@ class TestJWTSigningKeysES256:
         _, real_public_key = self._es256_keypair()
         attacker_private_key, _ = self._es256_keypair()
         forged_token = jwt.encode(
-            {"sub": "attacker", "exp": int(time.time()) + 3600},
+            {"sub": "attacker", "aud": "authenticated", "exp": int(time.time()) + 3600},
             attacker_private_key,
             algorithm="ES256",
         )
@@ -478,6 +484,45 @@ class TestJWTSigningKeysES256:
 
         assert response.status_code == 200
         assert response.json()["user_id"] == "user-uuid-1234"
+
+    def test_an_es256_token_missing_the_audience_claim_is_rejected(self):
+        # The SECOND bug hiding behind the first one, found only by testing
+        # against a real Supabase-issued token: signature verification
+        # succeeding isn't enough by itself if the audience claim isn't
+        # checked against what Supabase actually issues ("authenticated").
+        # This mints a token shaped exactly like a real one MINUS aud, to
+        # pin the specific gap that live testing found rather than just
+        # the general shape of "a valid token succeeds."
+        private_key, public_key = self._es256_keypair()
+        token = jwt.encode(
+            {"sub": "farmer-1", "exp": int(time.time()) + 3600},  # no aud
+            private_key,
+            algorithm="ES256",
+        )
+
+        with self._stub_jwks_returning(public_key):
+            client = self._build_protected_client()
+            response = client.get(
+                "/protected", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 401
+
+    def test_an_es256_token_with_the_wrong_audience_is_rejected(self):
+        private_key, public_key = self._es256_keypair()
+        token = jwt.encode(
+            {"sub": "farmer-1", "aud": "some-other-service", "exp": int(time.time()) + 3600},
+            private_key,
+            algorithm="ES256",
+        )
+
+        with self._stub_jwks_returning(public_key):
+            client = self._build_protected_client()
+            response = client.get(
+                "/protected", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 401
 
 
 # ---------------------------------------------------------------------------
