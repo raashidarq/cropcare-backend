@@ -190,7 +190,7 @@ class TestGenerate:
             assert "request_options" in kwargs
             assert kwargs["request_options"]["timeout"] == gemini._REQUEST_TIMEOUT_SECONDS
             # Farmers give up long before this; so does a demo audience.
-            assert 0 < gemini._REQUEST_TIMEOUT_SECONDS <= 30
+            assert 0 < gemini._REQUEST_TIMEOUT_SECONDS <= 20
 
 
 class TestKeyFallback:

@@ -94,7 +94,7 @@ def _is_missing_model(exc: Exception) -> bool:
 # connection to Google's API, or a slow network path from the host, hangs
 # the whole request indefinitely. Farmers give up long before three minutes;
 # so does a demo audience.
-_REQUEST_TIMEOUT_SECONDS = 20
+_REQUEST_TIMEOUT_SECONDS = 15
 
 
 def _is_quota_or_auth_error(exc: Exception) -> bool:
