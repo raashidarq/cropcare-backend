@@ -51,17 +51,17 @@ class _Settings:
         self.nvidia_api_key: str = os.environ.get("NVIDIA_API_KEY", "")
         # See dependencies/ai/nvidia_provider.py for why this specific model.
         self.nvidia_model: str = os.environ.get("NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
-        # Phone auth: costs real money per SMS, so this is a deliberate
-        # cost-control gate, not an oversight either way it's set.
+        # Phone auth is DISABLED by default — deliberate cost-control gate.
+        # Costs real money per SMS; enable only when explicitly configured.
         #
-        # Default flipped to ON here (2026-08-29) for a Twilio trial-number
-        # demo — Render has no PHONE_AUTH_ENABLED var set, and the point was
-        # to enable it without a dashboard step. Render's own env var still
-        # wins if set (PHONE_AUTH_ENABLED=false there turns it back off
-        # without another deploy). If this is still "true" after the demo,
-        # that's a stale default, not a decision — flip it back to "false".
+        # Was briefly defaulted to "true" in code (2026-08-29) to demo phone
+        # auth on a Twilio trial number without a Render dashboard step.
+        # Reverted once PHONE_AUTH_ENABLED=true was set on Render directly —
+        # that's the right place for this toggle going forward: explicit,
+        # visible in Render's own env var list, and doesn't quietly change
+        # the safe-by-default posture for every other deploy target.
         self.phone_auth_enabled: bool = (
-            os.environ.get("PHONE_AUTH_ENABLED", "true").strip().lower() == "true"
+            os.environ.get("PHONE_AUTH_ENABLED", "").strip().lower() == "true"
         )
 
     def __repr__(self) -> str:  # pragma: no cover
